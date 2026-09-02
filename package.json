@@ -1,0 +1,27 @@
+{
+    "author": "Moaske",
+    "dependencies": {},
+    "keywords": [],
+    "name": "fuelwatch",
+    "pebble": {
+        "displayName": "FuelWatch",
+        "enableMultiJS": true,
+        "messageKeys": [],
+        "projectType": "native",
+        "resources": {
+            "media": []
+        },
+        "sdkVersion": "3",
+        "targetPlatforms": [
+            "basalt",
+            "diorite",
+            "emery",
+            "flint"
+        ],
+        "uuid": "49f30472-268f-4eb9-a964-fa516c8962aa",
+        "watchapp": {
+            "watchface": false
+        }
+    },
+    "version": "1.0.0"
+}
