@@ -5,6 +5,13 @@
    ============================================================= */
 
 /* ----------------------------------------------------------
+   Clay – handles showConfiguration / webviewclosed automatically
+---------------------------------------------------------- */
+var Clay = require('@rebble/clay');
+var clayConfig = require('./config');
+var clay = new Clay(clayConfig);
+
+/* ----------------------------------------------------------
    Constants
 ---------------------------------------------------------- */
 var API_BASE      = 'https://tankservice.app-it-up.com/Tankservice/v2';
@@ -17,6 +24,51 @@ var PRICES_TTL_MS =  1 * 60 * 60 * 1000;  // 1 hour
 var MAX_STATIONS  = 10;                    // stations sent to watch
 var PRICE_FETCH_N =  5;                    // detail fetches per refresh
 var DRIFT_KM      =  5.0;                  // re-filter threshold (km)
+
+/* ----------------------------------------------------------
+   Fuel type helpers
+   Maps Clay setting value to the API fuel name patterns we match.
+---------------------------------------------------------- */
+var FUEL_TYPES = {
+  'E10':    ['E10', 'EURO95', 'EURO 95'],
+  'E5':     ['E5', 'EURO98', 'EURO 98', 'SP98'],
+  'DIESEL': ['B7', 'DIESEL'],
+  'LPG':    ['LPG', 'AUTOGAS', 'AUTO GAS']
+};
+
+function getFuelTypeSetting() {
+  try {
+    // Clay stores settings in localStorage under 'clay-settings'
+    var raw = localStorage.getItem('clay-settings');
+    if (raw) {
+      var settings = JSON.parse(raw);
+      if (settings && settings.FuelType && typeof settings.FuelType === 'string') {
+        return settings.FuelType;
+      }
+    }
+  } catch(e) {
+    console.log('[FuelWatch] Could not read fuel type setting: ' + e.message);
+  }
+  return 'E10';
+}
+
+/* Extract price for the selected fuel type from a fuels array.
+   Returns price in euros (float), or null if not available. */
+function extractFuelPrice(fuels, fuelType) {
+  var patterns = FUEL_TYPES[fuelType] || FUEL_TYPES['E10'];
+  for (var i = 0; i < fuels.length; i++) {
+    var f = fuels[i];
+    if (f.price === null || f.price === undefined) continue;
+    var match = (f.name || '').match(/\(([^)]+)\)/);
+    var type  = match ? match[1].toUpperCase() : (f.name || '').toUpperCase();
+    for (var j = 0; j < patterns.length; j++) {
+      if (type === patterns[j]) {
+        return f.price / 1000;  // API returns millicents
+      }
+    }
+  }
+  return null;
+}
 
 /* ----------------------------------------------------------
    Tiny SHA-1 (RFC 3174) – no external deps needed
@@ -71,7 +123,7 @@ function sha1(msg) {
 }
 
 /* ----------------------------------------------------------
-   UUID v4 generator (crypto-lite, good enough for checksum)
+   UUID v4 generator
 ---------------------------------------------------------- */
 function generateUUID() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
@@ -83,7 +135,6 @@ function generateUUID() {
 
 /* ----------------------------------------------------------
    X-Checksum header generator
-   Mirrors Python implementation in pyfuelprices/sources/netherlands/directlease.py
 ---------------------------------------------------------- */
 function generateChecksum(url) {
   var now       = new Date();
@@ -122,8 +173,6 @@ function cacheSet(key, val) {
 
 /* ----------------------------------------------------------
    XHR-based fetch wrapper (PebbleKit JS has no fetch API)
-   Returns a Promise resolving to a fetch-like response object
-   with .ok, .status, and .json() method.
 ---------------------------------------------------------- */
 function fetchWithTimeout(url, options, timeoutMs) {
   timeoutMs = timeoutMs || 10000;
@@ -208,9 +257,10 @@ function getPlaces() {
 
 /* ----------------------------------------------------------
    Fetch price detail for a single station
-   Prices in API are in millicents: divide by 1000 to get euros
+   Returns { price (for selected fuel type), address, brand, name }
+   price is null if the selected fuel type is not available.
 ---------------------------------------------------------- */
-function fetchStationPrices(stationId) {
+function fetchStationPrices(stationId, fuelType) {
   var url      = API_STATION.replace('{id}', stationId);
   var checksum = generateChecksum(url);
   return fetchWithTimeout(url, {
@@ -224,60 +274,53 @@ function fetchStationPrices(stationId) {
     if (!r.ok) throw new Error('Station fetch failed: HTTP ' + r.status);
     return r.json();
   }).then(function(data) {
-    var result = {
-      e10:     null,
-      diesel:  null,
+    return {
+      price:   extractFuelPrice(data.fuels || [], fuelType),
       address: data.address || '',
       brand:   data.brand   || '',
       name:    data.name    || ''
     };
-    var fuels = data.fuels || [];
-    fuels.forEach(function(f) {
-      if (f.price === null || f.price === undefined) return;
-      var cost  = f.price / 1000;
-      var match = (f.name || '').match(/\(([^)]+)\)/);
-      var type  = match ? match[1].toUpperCase() : (f.name || '').toUpperCase();
-      if (type === 'E10' || type === 'EURO95' || type === 'EURO 95') result.e10    = cost;
-      if (type === 'B7'  || type === 'DIESEL')                       result.diesel = cost;
-    });
-    return result;
   });
 }
 
 /* ----------------------------------------------------------
-   Get prices for a station – from cache or fetch fresh
+   Get prices for a station – from cache or fetch fresh.
+   Cache is keyed by stationId + fuelType so changing fuel type
+   bypasses the cache correctly.
 ---------------------------------------------------------- */
-function getStationPrices(stationId) {
-  var priceCache = cacheGet('fw_prices') || {};
+function getStationPrices(stationId, fuelType) {
+  var cacheKey   = 'fw_prices_' + fuelType;
+  var priceCache = cacheGet(cacheKey) || {};
   var cached     = priceCache[stationId];
   var now        = Date.now();
+
   if (cached && (now - cached.ts) < PRICES_TTL_MS) {
     return Promise.resolve(cached);
   }
-  return fetchStationPrices(stationId).then(function(prices) {
+
+  return fetchStationPrices(stationId, fuelType).then(function(data) {
     priceCache[stationId] = {
-      e10:     prices.e10,
-      diesel:  prices.diesel,
-      address: prices.address,
-      brand:   prices.brand,
-      name:    prices.name,
+      price:   data.price,
+      address: data.address,
+      brand:   data.brand,
+      name:    data.name,
       ts:      now
     };
-    cacheSet('fw_prices', priceCache);
+    cacheSet(cacheKey, priceCache);
     return priceCache[stationId];
   });
 }
 
 /* ----------------------------------------------------------
    AppMessage packing
-   Format per station: id|name|address|dist_m|e10_mills|diesel_mills|lat_e6|lon_e6
-   Prices in mills (×1000): 1979 = €1.979
+   Format per station: id|name|address|dist_m|fuel_mills|lat_e6|lon_e6
+   (7 fields — single price for the selected fuel type)
    Stations separated by newline, sent as single string on KEY_STATIONS.
 ---------------------------------------------------------- */
-var KEY_STATUS   = 0;
-var KEY_STATIONS = 1;
-var KEY_OWN_LAT  = 2;
-var KEY_OWN_LON  = 3;
+var KEY_STATUS    = 0;
+var KEY_STATIONS  = 1;
+var KEY_OWN_LAT   = 2;
+var KEY_OWN_LON   = 3;
 
 var STATUS_OK      = 0;
 var STATUS_ERROR   = 1;
@@ -285,14 +328,13 @@ var STATUS_BLOCKED = 2;
 var STATUS_LOCERR  = 3;
 
 function packStation(s) {
-  var e10Mills    = s.e10    ? Math.round(s.e10    * 1000) : 0;
-  var dieselMills = s.diesel ? Math.round(s.diesel * 1000) : 0;
-  var distM       = Math.round(s.dist * 1000);
-  var latE6       = Math.round(s.lat  * 1e6);
-  var lonE6       = Math.round(s.lon  * 1e6);
-  var name        = (s.name    || '').substring(0, 20).replace(/[|\n]/g, ' ');
-  var address     = (s.address || '').substring(0, 24).replace(/[|\n]/g, ' ');
-  return [s.id, name, address, distM, e10Mills, dieselMills, latE6, lonE6].join('|');
+  var fuelMills = s.price ? Math.round(s.price * 1000) : 0;
+  var distM     = Math.round(s.dist * 1000);
+  var latE6     = Math.round(s.lat  * 1e6);
+  var lonE6     = Math.round(s.lon  * 1e6);
+  var name      = (s.name    || '').substring(0, 20).replace(/[|\n]/g, ' ');
+  var address   = (s.address || '').substring(0, 24).replace(/[|\n]/g, ' ');
+  return [s.id, name, address, distM, fuelMills, latE6, lonE6].join('|');
 }
 
 function sendToWatch(result) {
@@ -315,43 +357,55 @@ function sendToWatch(result) {
 
 /* ----------------------------------------------------------
    Mock station data for emulator testing (used on IP_BLOCKED)
-   Positioned around the emulator's default location 51.5716,5.1002
 ---------------------------------------------------------- */
 var MOCK_STATIONS = [
-  { id: 1001, lat: 51.5730, lon: 5.1015, name: 'Shell',   address: 'Rijksweg 12, Tilburg',     e10: 1.979, diesel: 1.849 },
-  { id: 1002, lat: 51.5698, lon: 5.0988, name: 'TinQ',    address: 'Bredaseweg 44, Tilburg',    e10: 1.949, diesel: 1.829 },
-  { id: 1003, lat: 51.5745, lon: 5.0955, name: 'BP',      address: 'Ringbaan West 8, Tilburg',  e10: 1.969, diesel: 1.839 },
-  { id: 1004, lat: 51.5672, lon: 5.1034, name: 'Q8',      address: 'Scharnerweg 47, Tilburg',   e10: 1.989, diesel: 1.859 },
-  { id: 1005, lat: 51.5760, lon: 5.1050, name: 'Esso',    address: 'Spoorlaan 400, Tilburg',    e10: 1.959, diesel: 1.835 },
-  { id: 1006, lat: 51.5650, lon: 5.0970, name: 'Texaco',  address: 'Koningshoeven 1, Tilburg',  e10: 1.999, diesel: 1.869 },
-  { id: 1007, lat: 51.5800, lon: 5.0900, name: 'Tamoil',  address: 'Hasseltweg 22, Tilburg',    e10: 1.939, diesel: 1.819 }
+  { id: 1001, lat: 51.5730, lon: 5.1015, name: 'Shell',   address: 'Rijksweg 12, Tilburg',
+    prices: { E10: 1.979, E5: 2.049, DIESEL: 1.849, LPG: 0.939 } },
+  { id: 1002, lat: 51.5698, lon: 5.0988, name: 'TinQ',    address: 'Bredaseweg 44, Tilburg',
+    prices: { E10: 1.949, E5: 2.019, DIESEL: 1.829, LPG: 0.919 } },
+  { id: 1003, lat: 51.5745, lon: 5.0955, name: 'BP',      address: 'Ringbaan West 8, Tilburg',
+    prices: { E10: 1.969, E5: 2.039, DIESEL: 1.839, LPG: null   } },
+  { id: 1004, lat: 51.5672, lon: 5.1034, name: 'Q8',      address: 'Scharnerweg 47, Tilburg',
+    prices: { E10: 1.989, E5: 2.059, DIESEL: 1.859, LPG: 0.929 } },
+  { id: 1005, lat: 51.5760, lon: 5.1050, name: 'Esso',    address: 'Spoorlaan 400, Tilburg',
+    prices: { E10: 1.959, E5: 2.029, DIESEL: 1.835, LPG: null   } },
+  { id: 1006, lat: 51.5650, lon: 5.0970, name: 'Texaco',  address: 'Koningshoeven 1, Tilburg',
+    prices: { E10: 1.999, E5: 2.069, DIESEL: 1.869, LPG: 0.949 } },
+  { id: 1007, lat: 51.5800, lon: 5.0900, name: 'Tamoil',  address: 'Hasseltweg 22, Tilburg',
+    prices: { E10: 1.939, E5: 2.009, DIESEL: 1.819, LPG: null   } }
 ];
 
 function useMockData(lat, lon) {
-  console.log('[FuelWatch] Using mock data (emulator/IP blocked)');
-  var stations = MOCK_STATIONS.map(function(s) {
-    return {
-      id:      s.id,
-      lat:     s.lat,
-      lon:     s.lon,
-      name:    s.name,
-      brand:   s.name,
-      address: s.address,
-      dist:    haversine(lat, lon, s.lat, s.lon),
-      e10:     s.e10,
-      diesel:  s.diesel
-    };
-  });
-  stations.sort(function(a, b) { return a.dist - b.dist; });
+  var fuelType = getFuelTypeSetting();
+  console.log('[FuelWatch] Using mock data for fuel type: ' + fuelType);
+
+  var stations = MOCK_STATIONS
+    .map(function(s) {
+      return {
+        id:      s.id,
+        lat:     s.lat,
+        lon:     s.lon,
+        name:    s.name,
+        address: s.address,
+        dist:    haversine(lat, lon, s.lat, s.lon),
+        price:   s.prices[fuelType] || null
+      };
+    })
+    .filter(function(s) { return s.price !== null; })  // exclude unavailable
+    .sort(function(a, b) { return a.dist - b.dist; });
+
   sendToWatch({ status: 'ok', stations: stations, lat: lat, lon: lon });
 }
 
 /* ----------------------------------------------------------
    Core refresh: given a position, build the nearest-N list
-   with prices and send to watch
+   with prices and send to watch.
+   Stations without a price for the selected fuel type are excluded.
 ---------------------------------------------------------- */
 function refresh(lat, lon) {
-  console.log('[FuelWatch] Refreshing for position ' + lat + ',' + lon);
+  var fuelType = getFuelTypeSetting();
+  console.log('[FuelWatch] Refreshing for position ' + lat + ',' + lon +
+              ' fuel: ' + fuelType);
 
   getPlaces().then(function(places) {
     var annotated = places.map(function(s) {
@@ -367,54 +421,34 @@ function refresh(lat, lon) {
     });
 
     annotated.sort(function(a, b) { return a.dist - b.dist; });
-    var nearest = annotated.slice(0, MAX_STATIONS);
 
-    var priceTargets  = nearest.slice(0, PRICE_FETCH_N);
-    var pricePromises = priceTargets.map(function(s) {
-      return getStationPrices(s.id).then(function(prices) {
+    // Fetch prices for the nearest candidates — we fetch more than
+    // MAX_STATIONS because some may not carry the selected fuel type
+    var candidates    = annotated.slice(0, MAX_STATIONS * 3);
+    var pricePromises = candidates.map(function(s) {
+      return getStationPrices(s.id, fuelType).then(function(data) {
         return {
           id:      s.id,
           lat:     s.lat,
           lon:     s.lon,
-          name:    prices.name    || s.name,
-          brand:   prices.brand   || s.brand,
-          address: prices.address || s.city,
+          name:    data.name    || s.name,
+          address: data.address || s.city,
           dist:    s.dist,
-          e10:     prices.e10,
-          diesel:  prices.diesel
+          price:   data.price   // null if fuel type unavailable
         };
       }).catch(function(err) {
         console.warn('[FuelWatch] Price fetch failed for ' + s.id + ': ' + err.message);
-        return {
-          id:      s.id,
-          lat:     s.lat,
-          lon:     s.lon,
-          name:    s.name,
-          brand:   s.brand,
-          address: s.city,
-          dist:    s.dist,
-          e10:     null,
-          diesel:  null
-        };
+        return null;  // drop this station on fetch error
       });
     });
 
-    var remainder = nearest.slice(PRICE_FETCH_N).map(function(s) {
-      return {
-        id:      s.id,
-        lat:     s.lat,
-        lon:     s.lon,
-        name:    s.name,
-        brand:   s.brand,
-        address: s.city,
-        dist:    s.dist,
-        e10:     null,
-        diesel:  null
-      };
-    });
+    Promise.all(pricePromises).then(function(results) {
+      var stations = results
+        .filter(function(s) { return s !== null && s.price !== null; })
+        .slice(0, MAX_STATIONS);
 
-    Promise.all(pricePromises).then(function(withPrices) {
-      var stations = withPrices.concat(remainder);
+      console.log('[FuelWatch] Stations with ' + fuelType + ' price: ' + stations.length);
+
       cacheSet('fw_last_lat', lat);
       cacheSet('fw_last_lon', lon);
       sendToWatch({ status: 'ok', stations: stations, lat: lat, lon: lon });

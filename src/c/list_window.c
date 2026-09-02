@@ -13,38 +13,41 @@
 /* ----------------------------------------------------------
    Layout constants
 ---------------------------------------------------------- */
-#define ROW_HEIGHT        38  // px — fits two lines on all platforms
-#define HEADER_HEIGHT     16  // px — "Nearby stations" header
+#define ROW_HEIGHT        38   // px — fits two lines on all platforms
+#define HEADER_HEIGHT     22   // px — taller to fit station name font
 #define FONT_NAME         FONT_KEY_GOTHIC_18_BOLD
 #define FONT_DETAIL       FONT_KEY_GOTHIC_14
-#define PRICE_COL_WIDTH   52  // px reserved on the right for price
-#define SIDE_PAD           4  // px left/right padding inside row
-#define ROW_SEPARATOR_H    1  // px — separator line thickness
+#define FONT_HEADER       FONT_KEY_GOTHIC_18_BOLD
+#define PRICE_COL_WIDTH   52   // px reserved on the right for price
+#define SIDE_PAD           4   // px left/right padding inside row
+#define ROW_SEPARATOR_H    1   // px — separator line thickness
+#define SCROLL_REPEAT_MS  100  // ms — button repeat interval when held
 
 /* ----------------------------------------------------------
    Module-level state
 ---------------------------------------------------------- */
-static Window     *s_window;
-static MenuLayer  *s_menu_layer;
-static TextLayer  *s_status_layer;
-static bool        s_data_ready = false;
+static Window    *s_window;
+static MenuLayer *s_menu_layer;
+static TextLayer *s_status_layer;
+static bool       s_data_ready = false;
 
 /* ----------------------------------------------------------
    Helpers
 ---------------------------------------------------------- */
 
-/* Format a price in mills (×1000), e.g. 1979 = €1.979 */
+/* Format a price in mills (x1000), e.g. 1979 = 1.979 euro */
 static void format_price(char *buf, size_t len, uint16_t mills) {
   if (mills == 0) {
     snprintf(buf, len, "---");
   } else {
+    /* \xe2\x82\xac is the UTF-8 euro sign */
     snprintf(buf, len, "\xe2\x82\xac%u.%03u",
              mills / 1000,
              mills % 1000);
   }
 }
 
-/* Format distance: <1000m → "400m", ≥1000m → "1.2km" */
+/* Format distance: <1000m -> "400m", >=1000m -> "1.2km" */
 static void format_dist(char *buf, size_t len, uint32_t dist_m) {
   if (dist_m < 1000) {
     snprintf(buf, len, "%um", (unsigned)dist_m);
@@ -66,7 +69,6 @@ static uint16_t get_num_sections(MenuLayer *ml, void *ctx) {
 static uint16_t get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
   AppState *state = app_state_get();
   if (!s_data_ready || state->status != STATUS_OK) return 0;
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "get_num_rows: %d", state->count);
   return state->count;
 }
 
@@ -80,33 +82,49 @@ static int16_t get_header_height(MenuLayer *ml, uint16_t section, void *ctx) {
 
 static void draw_header(GContext *ctx, const Layer *cell_layer,
                         uint16_t section, void *cb_ctx) {
-  GRect bounds = layer_get_bounds(cell_layer);
-  graphics_context_set_text_color(ctx, GColorBlack);
+  AppState *state  = app_state_get();
+  GRect     bounds = layer_get_bounds(cell_layer);
+  int16_t   w      = bounds.size.w;
+
+  /* Black background */
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+
+  /* White text */
+  graphics_context_set_text_color(ctx, GColorWhite);
+
+  /* "Nearby stations" — two thirds of width */
   graphics_draw_text(ctx,
     "Nearby stations",
-    fonts_get_system_font(FONT_KEY_GOTHIC_14),
-    GRect(SIDE_PAD, 0, bounds.size.w - SIDE_PAD * 2, HEADER_HEIGHT),
+    fonts_get_system_font(FONT_HEADER),
+    GRect(SIDE_PAD, 1, w * 2 / 3, HEADER_HEIGHT),
     GTextOverflowModeTrailingEllipsis,
     GTextAlignmentLeft,
+    NULL);
+
+  /* Fuel type label — remaining third, right-aligned */
+  graphics_draw_text(ctx,
+    fuel_type_label(state->fuel_type),
+    fonts_get_system_font(FONT_HEADER),
+    GRect(w * 2 / 3, 1, w / 3 - SIDE_PAD, HEADER_HEIGHT),
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentRight,
     NULL);
 }
 
 static void draw_row(GContext *ctx, const Layer *cell_layer,
                      MenuIndex *idx, void *cb_ctx) {
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "draw_row: idx=%d", idx->row);
+  AppState *state     = app_state_get();
+  Station  *st        = &state->stations[idx->row];
+  GRect     bounds    = layer_get_bounds(cell_layer);
+  bool      highlight = menu_layer_is_index_selected(s_menu_layer, idx);
+  int16_t   w         = bounds.size.w;
 
-  AppState *state  = app_state_get();
-  Station  *st     = &state->stations[idx->row];
-  GRect     bounds = layer_get_bounds(cell_layer);
-  bool      highlighted = menu_layer_is_index_selected(s_menu_layer, idx);
-
-  int16_t w = bounds.size.w;
-
-  graphics_context_set_text_color(ctx, highlighted ? GColorWhite : GColorBlack);
+  graphics_context_set_text_color(ctx, highlight ? GColorWhite : GColorBlack);
 
   /* --- Price column (right-aligned, top line) ----------- */
   char price_buf[12];
-  format_price(price_buf, sizeof(price_buf), st->e10_mills);
+  format_price(price_buf, sizeof(price_buf), st->fuel_mills);
 
   graphics_draw_text(ctx,
     price_buf,
@@ -125,23 +143,30 @@ static void draw_row(GContext *ctx, const Layer *cell_layer,
     GTextAlignmentLeft,
     NULL);
 
-  /* --- Detail line: address + distance (bottom line) ---- */
+    /* --- Detail line: address left, distance right, both bold --- */
   char dist_buf[16];
   format_dist(dist_buf, sizeof(dist_buf), st->dist_m);
 
-  char detail_buf[48];
-  snprintf(detail_buf, sizeof(detail_buf), "%s  %s", st->address, dist_buf);
-
+  /* Address — left-aligned, clipped before distance */
   graphics_draw_text(ctx,
-    detail_buf,
+    st->address,
     fonts_get_system_font(FONT_DETAIL),
-    GRect(SIDE_PAD, 21, w - SIDE_PAD * 2, 16),
+    GRect(SIDE_PAD, 21, w - 48 - SIDE_PAD * 2, 16),
     GTextOverflowModeTrailingEllipsis,
     GTextAlignmentLeft,
     NULL);
 
+  /* Distance — right-aligned, bold */
+  graphics_draw_text(ctx,
+    dist_buf,
+    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
+    GRect(w - 48 - SIDE_PAD, 21, 48, 16),
+    GTextOverflowModeTrailingEllipsis,
+    GTextAlignmentRight,
+    NULL);
+  
   /* --- 1px separator at bottom of cell ----------------- */
-  if (!highlighted) {
+  if (!highlight) {
     GColor sep_color;
 #ifdef PBL_COLOR
     sep_color = GColorLightGray;
@@ -155,11 +180,37 @@ static void draw_row(GContext *ctx, const Layer *cell_layer,
   }
 }
 
-static void select_click(MenuLayer *ml, MenuIndex *idx, void *ctx) {
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "select_click: idx=%d", idx->row);
+/* ----------------------------------------------------------
+   Custom click handlers — prevent wrap-around at list ends
+---------------------------------------------------------- */
+static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
+  MenuIndex idx = menu_layer_get_selected_index(s_menu_layer);
+  if (idx.row > 0) {
+    idx.row--;
+    menu_layer_set_selected_index(s_menu_layer, idx, MenuRowAlignCenter, true);
+  }
+}
+
+static void down_click_handler(ClickRecognizerRef recognizer, void *context) {
   AppState *state = app_state_get();
-  state->selected_index = (uint8_t)idx->row;
+  MenuIndex idx   = menu_layer_get_selected_index(s_menu_layer);
+  if (state->count > 0 && idx.row < (uint16_t)(state->count - 1)) {
+    idx.row++;
+    menu_layer_set_selected_index(s_menu_layer, idx, MenuRowAlignCenter, true);
+  }
+}
+
+static void select_click_handler(ClickRecognizerRef recognizer, void *context) {
+  MenuIndex idx   = menu_layer_get_selected_index(s_menu_layer);
+  AppState *state = app_state_get();
+  state->selected_index = (uint8_t)idx.row;
   map_window_push();
+}
+
+static void click_config_provider(void *context) {
+  window_single_repeating_click_subscribe(BUTTON_ID_UP,   SCROLL_REPEAT_MS, up_click_handler);
+  window_single_repeating_click_subscribe(BUTTON_ID_DOWN, SCROLL_REPEAT_MS, down_click_handler);
+  window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
 }
 
 /* ----------------------------------------------------------
@@ -171,7 +222,6 @@ static void update_status_layer(void) {
   if (s_data_ready && state->status == STATUS_OK) {
     layer_set_hidden(text_layer_get_layer(s_status_layer), true);
     menu_layer_reload_data(s_menu_layer);
-    menu_layer_set_click_config_onto_window(s_menu_layer, s_window);
     return;
   }
 
@@ -179,18 +229,17 @@ static void update_status_layer(void) {
 
   const char *msg;
   if (!s_data_ready) {
-    msg = "Locating\nnearby stations\u2026";
+    msg = "Locating\nnearby stations...";
   } else {
     switch (state->status) {
-      case STATUS_BLOCKED: msg = "Service unavailable\n(rate limited)";  break;
-      case STATUS_LOCERR:  msg = "Could not determine\nyour location";   break;
-      default:             msg = "Could not fetch\nfuel prices";         break;
+      case STATUS_BLOCKED: msg = "Service unavailable\n(rate limited)"; break;
+      case STATUS_LOCERR:  msg = "Could not determine\nyour location";  break;
+      default:             msg = "Could not fetch\nfuel prices";        break;
     }
   }
   text_layer_set_text(s_status_layer, msg);
 }
 
-void menu_layer_set_scroll_wrap_around(MenuLayer *menu_layer, bool wrap_around);
 /* ----------------------------------------------------------
    Window callbacks
 ---------------------------------------------------------- */
@@ -200,7 +249,6 @@ static void window_load(Window *window) {
 
   /* --- MenuLayer ---------------------------------------- */
   s_menu_layer = menu_layer_create(bounds);
-  menu_layer_set_scroll_wrap_around(s_menu_layer, false);
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
     .get_num_sections  = get_num_sections,
     .get_num_rows      = get_num_rows,
@@ -208,9 +256,9 @@ static void window_load(Window *window) {
     .get_header_height = get_header_height,
     .draw_header       = draw_header,
     .draw_row          = draw_row,
-    .select_click      = select_click,
   });
-  menu_layer_set_click_config_onto_window(s_menu_layer, window);
+
+  window_set_click_config_provider(window, click_config_provider);
 
 #ifdef PBL_COLOR
   menu_layer_set_highlight_colors(s_menu_layer, GColorCobaltBlue, GColorWhite);

@@ -18,49 +18,44 @@ AppState *app_state_get(void) {
 
 /* ----------------------------------------------------------
    AppMessage inbox size
-   Worst case: 10 stations × ~80 bytes per packed line + dict overhead
+   Worst case: 10 stations x ~75 bytes per packed line + dict overhead
 ---------------------------------------------------------- */
 #define INBOX_SIZE  2048
 #define OUTBOX_SIZE   64
 
 /* ----------------------------------------------------------
    Parse one packed station line into a Station struct.
-   Format: id|name|address|dist_m|e10_mills|diesel_mills|lat_e6|lon_e6
-   Prices in mills (×1000): 1979 = €1.979
-   Uses strchr field splitting — safe to call from within a
-   strchr loop (unlike strtok which has global state).
+   Format: id|name|address|dist_m|fuel_mills|lat_e6|lon_e6
+   Prices in mills (x1000): 1979 = 1.979 euro
+   Uses strchr field splitting — safe inside a strchr loop.
 ---------------------------------------------------------- */
 static bool parse_station_line(char *line, Station *out) {
   char *p   = line;
   char *sep;
   int field = 0;
 
-  while (field < 8) {
+  while (field < 7) {
     sep = strchr(p, '|');
-    if (sep) *sep = '\0';  // terminate field in place
+    if (sep) *sep = '\0';
 
     switch (field) {
-      case 0: out->id           = (uint32_t)atoi(p); break;
+      case 0: out->id         = (uint32_t)atoi(p); break;
       case 1: strncpy(out->name,    p, STATION_NAME_LEN - 1);
-              out->name[STATION_NAME_LEN - 1] = '\0';   break;
+              out->name[STATION_NAME_LEN - 1] = '\0';    break;
       case 2: strncpy(out->address, p, STATION_ADDR_LEN - 1);
-              out->address[STATION_ADDR_LEN - 1] = '\0'; break;
-      case 3: out->dist_m       = (uint32_t)atoi(p); break;
-      case 4: out->e10_mills    = (uint16_t)atoi(p); break;
-      case 5: out->diesel_mills = (uint16_t)atoi(p); break;
-      case 6: out->lat_e6       = (int32_t) atoi(p); break;
-      case 7: out->lon_e6       = (int32_t) atoi(p); break;
+              out->address[STATION_ADDR_LEN - 1] = '\0';  break;
+      case 3: out->dist_m     = (uint32_t)atoi(p); break;
+      case 4: out->fuel_mills = (uint16_t)atoi(p); break;
+      case 5: out->lat_e6     = (int32_t) atoi(p); break;
+      case 6: out->lon_e6     = (int32_t) atoi(p); break;
     }
 
     field++;
-    if (!sep) break;   // was last field
-    p = sep + 1;       // advance past separator
+    if (!sep) break;
+    p = sep + 1;
   }
 
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Parsed fields: %d id:%lu e10:%u",
-          field, (unsigned long)out->id, out->e10_mills);
-
-  return (field == 8);
+  return (field == 7);
 }
 
 /* ----------------------------------------------------------
@@ -84,8 +79,6 @@ static void parse_stations_payload(const char *payload) {
     char *nl = strchr(p, '\n');
     if (nl) *nl = '\0';
 
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Parsing line %d: %.40s", s_state.count, p);
-
     Station st;
     memset(&st, 0, sizeof(st));
     if (parse_station_line(p, &st)) {
@@ -100,15 +93,41 @@ static void parse_stations_payload(const char *payload) {
 }
 
 /* ----------------------------------------------------------
+   Map fuel type string from Clay to FUEL_* constant
+---------------------------------------------------------- */
+static uint8_t parse_fuel_type(const char *str) {
+  if (!str) return FUEL_E10;
+  if (strcmp(str, "E5")     == 0) return FUEL_E5;
+  if (strcmp(str, "DIESEL") == 0) return FUEL_DIESEL;
+  if (strcmp(str, "LPG")    == 0) return FUEL_LPG;
+  return FUEL_E10;
+}
+
+/* ----------------------------------------------------------
    AppMessage callbacks
 ---------------------------------------------------------- */
 static void inbox_received(DictionaryIterator *iter, void *context) {
   APP_LOG(APP_LOG_LEVEL_DEBUG, "Inbox received");
 
-  Tuple *status_t   = dict_find(iter, KEY_STATUS);
-  Tuple *stations_t = dict_find(iter, KEY_STATIONS);
-  Tuple *lat_t      = dict_find(iter, KEY_OWN_LAT);
-  Tuple *lon_t      = dict_find(iter, KEY_OWN_LON);
+  Tuple *status_t    = dict_find(iter, KEY_STATUS);
+  Tuple *stations_t  = dict_find(iter, KEY_STATIONS);
+  Tuple *lat_t       = dict_find(iter, KEY_OWN_LAT);
+  Tuple *lon_t       = dict_find(iter, KEY_OWN_LON);
+  Tuple *fuel_type_t = dict_find(iter, KEY_FUEL_TYPE);
+
+  /* Clay sends fuel type independently on settings save */
+   if (fuel_type_t && fuel_type_t->type == TUPLE_CSTRING) {
+    s_state.fuel_type = parse_fuel_type(fuel_type_t->value->cstring);
+    APP_LOG(APP_LOG_LEVEL_INFO, "Fuel type set to: %d", s_state.fuel_type);
+    list_window_data_arrived();
+    /* Request a fresh data fetch with the new fuel type */
+    DictionaryIterator *out;
+    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+      dict_write_uint8(out, KEY_STATUS, 0);
+      app_message_outbox_send();
+    }
+    return;
+  }
 
   if (!status_t) {
     APP_LOG(APP_LOG_LEVEL_WARNING, "No status key in message");
@@ -121,11 +140,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   if (s_state.status == STATUS_OK) {
     if (lat_t) s_state.own_lat_e6 = lat_t->value->int32;
     if (lon_t) s_state.own_lon_e6 = lon_t->value->int32;
-    APP_LOG(APP_LOG_LEVEL_DEBUG, "Own pos: %ld, %ld",
-            (long)s_state.own_lat_e6, (long)s_state.own_lon_e6);
     if (stations_t && stations_t->type == TUPLE_CSTRING) {
-      APP_LOG(APP_LOG_LEVEL_DEBUG, "Stations string length: %d",
-              (int)strlen(stations_t->value->cstring));
       parse_stations_payload(stations_t->value->cstring);
     } else {
       APP_LOG(APP_LOG_LEVEL_WARNING, "No stations tuple or wrong type");
@@ -149,7 +164,8 @@ static void outbox_failed(DictionaryIterator *iter,
 ---------------------------------------------------------- */
 static void init(void) {
   memset(&s_state, 0, sizeof(s_state));
-  s_state.status = STATUS_ERROR;
+  s_state.status    = STATUS_ERROR;
+  s_state.fuel_type = FUEL_E10;  // default until Clay sends a value
 
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);

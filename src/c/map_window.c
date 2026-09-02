@@ -244,9 +244,6 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
   graphics_context_set_stroke_color(ctx, GColorLightGray);
 #else
   /* On B&W skip the grid — too noisy at 1-bit */
-  // (intentionally empty)
-  bool draw_grid = false;
-  (void)draw_grid;
 #endif
 
 #ifdef PBL_COLOR

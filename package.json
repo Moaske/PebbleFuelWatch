@@ -1,15 +1,58 @@
 {
     "author": "Moaske",
-    "dependencies": {},
+    "dependencies": {
+        "@rebble/clay": "^1.1.0"
+    },
     "keywords": [],
     "name": "fuelwatch",
     "pebble": {
+        "capabilities": [
+            "location",
+            "configurable"
+        ],
         "displayName": "FuelWatch",
         "enableMultiJS": true,
-        "messageKeys": [],
+        "messageKeys": [
+            "STATUS",
+            "STATION",
+            "OWN_LAT",
+            "OWN_LON",
+            "FuelType"
+        ],
         "projectType": "native",
         "resources": {
-            "media": []
+            "media": [
+                {
+                    "file": "fonts/segoeui.ttf",
+                    "name": "FONT_SEGOEUI_18",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeui.ttf",
+                    "name": "FONT_SEGOEUI_14",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeuib.ttf",
+                    "name": "FONT_SEGOEUIB_22",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeuib.ttf",
+                    "name": "FONT_SEGOEUIB_18",
+                    "targetPlatforms": null,
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeuib.ttf",
+                    "name": "FONT_SEGOEUIB_14",
+                    "targetPlatforms": null,
+                    "type": "font"
+                }
+            ]
         },
         "sdkVersion": "3",
         "targetPlatforms": [
