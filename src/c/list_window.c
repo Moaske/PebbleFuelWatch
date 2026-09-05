@@ -1,8 +1,9 @@
 /* =============================================================
    list_window.c – FuelWatch station list
    Two-line MenuLayer rows: name + price / address + distance
-   Responsive to screen size (Basalt/Flint/Diorite 144px wide,
-   Emery 200px wide).
+   Responsive to screen size and platform:
+     Emery  (200x228): larger custom fonts, touch handlers
+     Others (144x168): smaller custom fonts, button handlers
    ============================================================= */
 
 #include <pebble.h>
@@ -11,17 +12,39 @@
 #include "map_window.h"
 
 /* ----------------------------------------------------------
-   Layout constants
+   Platform-responsive layout constants
 ---------------------------------------------------------- */
-#define ROW_HEIGHT        38   // px — fits two lines on all platforms
-#define HEADER_HEIGHT     22   // px — taller to fit station name font
-#define FONT_NAME         FONT_KEY_GOTHIC_18_BOLD
-#define FONT_DETAIL       FONT_KEY_GOTHIC_14
-#define FONT_HEADER       FONT_KEY_GOTHIC_18_BOLD
-#define PRICE_COL_WIDTH   52   // px reserved on the right for price
-#define SIDE_PAD           4   // px left/right padding inside row
-#define ROW_SEPARATOR_H    1   // px — separator line thickness
-#define SCROLL_REPEAT_MS  100  // ms — button repeat interval when held
+#ifdef PBL_PLATFORM_EMERY
+  #define ROW_HEIGHT       52
+  #define HEADER_HEIGHT    26
+  #define PRICE_COL_WIDTH  62
+  #define DIST_COL_WIDTH   54
+  #define NAME_Y            2
+  #define NAME_H           24
+  #define DETAIL_Y         26
+  #define DETAIL_H         26
+#else
+  #define ROW_HEIGHT       43
+  #define HEADER_HEIGHT    20
+  #define PRICE_COL_WIDTH  50
+  #define DIST_COL_WIDTH   46
+  #define NAME_Y            1
+  #define NAME_H           20
+  #define DETAIL_Y         20
+  #define DETAIL_H         21
+#endif
+
+#define SIDE_PAD          4    // px left/right padding
+#define ROW_SEPARATOR_H   1    // px separator thickness
+#define SCROLL_REPEAT_MS  100  // ms button repeat interval
+
+/* ----------------------------------------------------------
+   Custom font handles — loaded in window_load, freed in window_unload
+---------------------------------------------------------- */
+static GFont s_font_name;      // station name + price (bold, larger)
+static GFont s_font_detail;    // address (regular, smaller)
+static GFont s_font_header;    // header text (bold)
+static GFont s_font_distance;  // distance (bold, same size as detail)
 
 /* ----------------------------------------------------------
    Module-level state
@@ -35,26 +58,21 @@ static bool       s_data_ready = false;
    Helpers
 ---------------------------------------------------------- */
 
-/* Format a price in mills (x1000), e.g. 1979 = 1.979 euro */
 static void format_price(char *buf, size_t len, uint16_t mills) {
   if (mills == 0) {
     snprintf(buf, len, "---");
   } else {
-    /* \xe2\x82\xac is the UTF-8 euro sign */
-    snprintf(buf, len, "\xe2\x82\xac%u.%03u",
-             mills / 1000,
-             mills % 1000);
+    snprintf(buf, len, "\xe2\x82\xac%u.%03u", mills / 1000, mills % 1000);
   }
 }
 
-/* Format distance: <1000m -> "400m", >=1000m -> "1.2km" */
 static void format_dist(char *buf, size_t len, uint32_t dist_m) {
   if (dist_m < 1000) {
     snprintf(buf, len, "%um", (unsigned)dist_m);
   } else {
-    uint32_t km_whole = dist_m / 1000;
-    uint32_t km_tenth = (dist_m % 1000) / 100;
-    snprintf(buf, len, "%u.%ukm", (unsigned)km_whole, (unsigned)km_tenth);
+    snprintf(buf, len, "%u.%ukm",
+             (unsigned)(dist_m / 1000),
+             (unsigned)((dist_m % 1000) / 100));
   }
 }
 
@@ -62,9 +80,7 @@ static void format_dist(char *buf, size_t len, uint32_t dist_m) {
    MenuLayer callbacks
 ---------------------------------------------------------- */
 
-static uint16_t get_num_sections(MenuLayer *ml, void *ctx) {
-  return 1;
-}
+static uint16_t get_num_sections(MenuLayer *ml, void *ctx) { return 1; }
 
 static uint16_t get_num_rows(MenuLayer *ml, uint16_t section, void *ctx) {
   AppState *state = app_state_get();
@@ -86,27 +102,22 @@ static void draw_header(GContext *ctx, const Layer *cell_layer,
   GRect     bounds = layer_get_bounds(cell_layer);
   int16_t   w      = bounds.size.w;
 
-  /* Black background */
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
-
-  /* White text */
   graphics_context_set_text_color(ctx, GColorWhite);
 
-  /* "Nearby stations" — two thirds of width */
   graphics_draw_text(ctx,
-    "Nearby stations",
-    fonts_get_system_font(FONT_HEADER),
-    GRect(SIDE_PAD, 1, w * 2 / 3, HEADER_HEIGHT),
+    "Nearby you:",
+    s_font_header,
+    GRect(SIDE_PAD, 1, w * 2 / 3, HEADER_HEIGHT - 2),
     GTextOverflowModeTrailingEllipsis,
     GTextAlignmentLeft,
     NULL);
 
-  /* Fuel type label — remaining third, right-aligned */
   graphics_draw_text(ctx,
     fuel_type_label(state->fuel_type),
-    fonts_get_system_font(FONT_HEADER),
-    GRect(w * 2 / 3, 1, w / 3 - SIDE_PAD, HEADER_HEIGHT),
+    s_font_header,
+    GRect(w * 2 / 3, 1, w / 3 - SIDE_PAD, HEADER_HEIGHT - 2),
     GTextOverflowModeTrailingEllipsis,
     GTextAlignmentRight,
     NULL);
@@ -122,50 +133,31 @@ static void draw_row(GContext *ctx, const Layer *cell_layer,
 
   graphics_context_set_text_color(ctx, highlight ? GColorWhite : GColorBlack);
 
-  /* --- Price column (right-aligned, top line) ----------- */
+  /* Price — right-aligned, top line */
   char price_buf[12];
   format_price(price_buf, sizeof(price_buf), st->fuel_mills);
+  graphics_draw_text(ctx, price_buf, s_font_name,
+    GRect(w - PRICE_COL_WIDTH - SIDE_PAD, NAME_Y, PRICE_COL_WIDTH, NAME_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
-  graphics_draw_text(ctx,
-    price_buf,
-    fonts_get_system_font(FONT_NAME),
-    GRect(w - PRICE_COL_WIDTH - SIDE_PAD, 1, PRICE_COL_WIDTH, 20),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentRight,
-    NULL);
+  /* Station name — left, top line */
+  graphics_draw_text(ctx, st->name, s_font_name,
+    GRect(SIDE_PAD, NAME_Y, w - PRICE_COL_WIDTH - SIDE_PAD * 3, NAME_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  /* --- Station name (left, top line) -------------------- */
-  graphics_draw_text(ctx,
-    st->name,
-    fonts_get_system_font(FONT_NAME),
-    GRect(SIDE_PAD, 1, w - PRICE_COL_WIDTH - SIDE_PAD * 3, 20),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentLeft,
-    NULL);
+  /* Address — left, detail line */
+  graphics_draw_text(ctx, st->address, s_font_detail,
+    GRect(SIDE_PAD, DETAIL_Y, w - DIST_COL_WIDTH - SIDE_PAD * 2, DETAIL_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-    /* --- Detail line: address left, distance right, both bold --- */
+  /* Distance — right, detail line, bold */
   char dist_buf[16];
   format_dist(dist_buf, sizeof(dist_buf), st->dist_m);
+  graphics_draw_text(ctx, dist_buf, s_font_distance,
+    GRect(w - DIST_COL_WIDTH - SIDE_PAD, DETAIL_Y, DIST_COL_WIDTH, DETAIL_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
-  /* Address — left-aligned, clipped before distance */
-  graphics_draw_text(ctx,
-    st->address,
-    fonts_get_system_font(FONT_DETAIL),
-    GRect(SIDE_PAD, 21, w - 48 - SIDE_PAD * 2, 16),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentLeft,
-    NULL);
-
-  /* Distance — right-aligned, bold */
-  graphics_draw_text(ctx,
-    dist_buf,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-    GRect(w - 48 - SIDE_PAD, 21, 48, 16),
-    GTextOverflowModeTrailingEllipsis,
-    GTextAlignmentRight,
-    NULL);
-  
-  /* --- 1px separator at bottom of cell ----------------- */
+  /* Separator */
   if (!highlight) {
     GColor sep_color;
 #ifdef PBL_COLOR
@@ -181,8 +173,20 @@ static void draw_row(GContext *ctx, const Layer *cell_layer,
 }
 
 /* ----------------------------------------------------------
-   Custom click handlers — prevent wrap-around at list ends
+   Click / touch handlers
+   Emery: MenuLayer native click+touch config handles everything.
+   Others: custom provider with clamped UP/DOWN (no wrap).
 ---------------------------------------------------------- */
+#ifdef PBL_PLATFORM_EMERY
+
+static void select_click(MenuLayer *ml, MenuIndex *idx, void *ctx) {
+  AppState *state = app_state_get();
+  state->selected_index = (uint8_t)idx->row;
+  map_window_push();
+}
+
+#else
+
 static void up_click_handler(ClickRecognizerRef recognizer, void *context) {
   MenuIndex idx = menu_layer_get_selected_index(s_menu_layer);
   if (idx.row > 0) {
@@ -212,6 +216,8 @@ static void click_config_provider(void *context) {
   window_single_repeating_click_subscribe(BUTTON_ID_DOWN, SCROLL_REPEAT_MS, down_click_handler);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click_handler);
 }
+
+#endif
 
 /* ----------------------------------------------------------
    Status / loading text layer
@@ -247,8 +253,33 @@ static void window_load(Window *window) {
   Layer *root   = window_get_root_layer(window);
   GRect  bounds = layer_get_bounds(root);
 
-  /* --- MenuLayer ---------------------------------------- */
+  /* Load custom fonts */
+#ifdef PBL_PLATFORM_EMERY
+  s_font_name     = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_20));
+  s_font_detail   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_18));
+  s_font_header   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_20));
+  s_font_distance = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
+#else
+  s_font_name     = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_16));
+  s_font_detail   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_14));
+  s_font_header   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_14));
+  s_font_distance = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_14));
+#endif
+
+  /* MenuLayer */
   s_menu_layer = menu_layer_create(bounds);
+
+#ifdef PBL_PLATFORM_EMERY
+  menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
+    .get_num_sections  = get_num_sections,
+    .get_num_rows      = get_num_rows,
+    .get_cell_height   = get_row_height,
+    .get_header_height = get_header_height,
+    .draw_header       = draw_header,
+    .draw_row          = draw_row,
+    .select_click      = select_click,
+  });
+#else
   menu_layer_set_callbacks(s_menu_layer, NULL, (MenuLayerCallbacks){
     .get_num_sections  = get_num_sections,
     .get_num_rows      = get_num_rows,
@@ -257,21 +288,24 @@ static void window_load(Window *window) {
     .draw_header       = draw_header,
     .draw_row          = draw_row,
   });
-
   window_set_click_config_provider(window, click_config_provider);
+#endif
 
 #ifdef PBL_COLOR
   menu_layer_set_highlight_colors(s_menu_layer, GColorCobaltBlue, GColorWhite);
 #endif
 
-  layer_add_child(root, menu_layer_get_layer(s_menu_layer));
+    layer_add_child(root, menu_layer_get_layer(s_menu_layer));
+#ifdef PBL_PLATFORM_EMERY
+  menu_layer_set_click_config_onto_window(s_menu_layer, window);
+  app_touch_navigation_enable(true);  // opt into system touch nav
+#endif
 
-  /* --- Status / loading layer --------------------------- */
+  /* Status layer */
   s_status_layer = text_layer_create(
     GRect(SIDE_PAD * 2, bounds.size.h / 3,
-          bounds.size.w - SIDE_PAD * 4, 60));
-  text_layer_set_font(s_status_layer,
-    fonts_get_system_font(FONT_KEY_GOTHIC_18));
+          bounds.size.w - SIDE_PAD * 4, 80));
+  text_layer_set_font(s_status_layer, s_font_name);
   text_layer_set_text_alignment(s_status_layer, GTextAlignmentCenter);
   text_layer_set_background_color(s_status_layer, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_status_layer));
@@ -284,6 +318,12 @@ static void window_unload(Window *window) {
   text_layer_destroy(s_status_layer);
   s_menu_layer   = NULL;
   s_status_layer = NULL;
+
+  /* Unload custom fonts */
+  fonts_unload_custom_font(s_font_name);
+  fonts_unload_custom_font(s_font_detail);
+  fonts_unload_custom_font(s_font_header);
+  fonts_unload_custom_font(s_font_distance);
 }
 
 /* ----------------------------------------------------------

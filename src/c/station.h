@@ -42,7 +42,6 @@ static inline const char *fuel_type_label(uint8_t fuel_type) {
 /* Prices stored as millicents x1000: 1979 = 1.979 euro
    0 means price not available. */
 typedef struct {
-  uint32_t id;
   char     name[STATION_NAME_LEN];
   char     address[STATION_ADDR_LEN];
   uint32_t dist_m;        // distance in metres

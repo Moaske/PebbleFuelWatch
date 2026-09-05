@@ -39,7 +39,7 @@ static bool parse_station_line(char *line, Station *out) {
     if (sep) *sep = '\0';
 
     switch (field) {
-      case 0: out->id         = (uint32_t)atoi(p); break;
+      case 0: /* id — string, not used on watch side, skip */ break;
       case 1: strncpy(out->name,    p, STATION_NAME_LEN - 1);
               out->name[STATION_NAME_LEN - 1] = '\0';    break;
       case 2: strncpy(out->address, p, STATION_ADDR_LEN - 1);

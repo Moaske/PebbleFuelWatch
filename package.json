@@ -25,32 +25,64 @@
                 {
                     "file": "fonts/segoeui.ttf",
                     "name": "FONT_SEGOEUI_18",
-                    "targetPlatforms": null,
+                    "targetPlatforms": [
+                        "emery"
+                    ],
                     "type": "font"
                 },
                 {
                     "file": "fonts/segoeui.ttf",
                     "name": "FONT_SEGOEUI_14",
-                    "targetPlatforms": null,
+                    "targetPlatforms": [
+                        "basalt",
+                        "diorite",
+                        "flint"
+                    ],
                     "type": "font"
                 },
                 {
                     "file": "fonts/segoeuib.ttf",
-                    "name": "FONT_SEGOEUIB_22",
-                    "targetPlatforms": null,
+                    "name": "FONT_SEGOEUIB_20",
+                    "targetPlatforms": [
+                        "emery"
+                    ],
                     "type": "font"
                 },
                 {
                     "file": "fonts/segoeuib.ttf",
-                    "name": "FONT_SEGOEUIB_18",
-                    "targetPlatforms": null,
+                    "name": "FONT_SEGOEUIB_16",
+                    "targetPlatforms": [
+                        "basalt",
+                        "diorite",
+                        "emery",
+                        "flint"
+                    ],
                     "type": "font"
                 },
                 {
                     "file": "fonts/segoeuib.ttf",
                     "name": "FONT_SEGOEUIB_14",
-                    "targetPlatforms": null,
+                    "targetPlatforms": [
+                        "basalt",
+                        "diorite",
+                        "flint"
+                    ],
                     "type": "font"
+                },
+                {
+                    "file": "fonts/segoeuib.ttf",
+                    "name": "FONT_SEGOEUIB_18",
+                    "targetPlatforms": [
+                        "emery"
+                    ],
+                    "type": "font"
+                },
+                {
+                    "file": "images/gasstation_app_icon.png",
+                    "menuIcon": true,
+                    "name": "APP_ICON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
                 }
             ]
         },
@@ -66,5 +98,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.0"
+    "version": "1.0.2"
 }
