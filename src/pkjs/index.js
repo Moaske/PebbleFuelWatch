@@ -1,49 +1,31 @@
 /* =============================================================
    FuelWatch – PebbleKit JS layer
-   Fetches nearby fuel station prices from ANWB Onderweg API
-   Single bounding box call returns stations + prices for NL + BE
-   API: https://api.anwb.nl/routing/points-of-interest/v3/all
+   Station data: ANWB Onderweg API (single bbox call, NL+BE)
+   Map backdrop: OSM raster tile, dithered + chunked to watch
    ============================================================= */
 
 /* ----------------------------------------------------------
    Clay + message keys
 ---------------------------------------------------------- */
-var Clay       = require('@rebble/clay');
-var clayConfig = require('./config');
+var Clay        = require('@rebble/clay');
+var clayConfig  = require('./config');
 var messageKeys = require('message_keys');
-var clay = new Clay(clayConfig);
+var clay        = new Clay(clayConfig);
 
 /* ----------------------------------------------------------
    Constants
 ---------------------------------------------------------- */
-var API_ANWB     = 'https://api.anwb.nl/routing/points-of-interest/v3/all';
-var API_OVERPASS = 'https://overpass-api.de/api/interpreter';
-var API_TYPE     = 'FUEL_STATION';
+var API_ANWB   = 'https://api.anwb.nl/routing/points-of-interest/v3/all';
+var API_TYPE   = 'FUEL_STATION';
+var OSM_TILE   = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
-var BBOX_RADIUS     = 0.12;           // degrees (~13km) for station list
-var MAP_BBOX_RADIUS = 0.025;          // degrees (~2.5km) for road map
-var CACHE_TTL_MS    = 15 * 60 * 1000; // 15 min for station data
-var ROAD_CACHE_TTL  = 24 * 60 * 60 * 1000; // 24h for road geometry
-var MAX_STATIONS    = 10;
-var MAX_ROAD_SEGS   = 75;             // stay under AppMessage limit
-var DRIFT_KM        = 2.0;
-
-/* Road type categories */
-var ROAD_MAJOR  = 0;
-var ROAD_MEDIUM = 1;
-var ROAD_MINOR  = 2;
-
-var ROAD_TYPE_MAP = {
-  'motorway': ROAD_MAJOR,  'motorway_link': ROAD_MAJOR,
-  'trunk':    ROAD_MAJOR,  'trunk_link':    ROAD_MAJOR,
-  'primary':  ROAD_MAJOR,  'primary_link':  ROAD_MAJOR,
-  'secondary':  ROAD_MEDIUM, 'secondary_link':  ROAD_MEDIUM,
-  'tertiary':   ROAD_MEDIUM, 'tertiary_link':   ROAD_MEDIUM,
-  'residential':   ROAD_MINOR,
-  'unclassified':  ROAD_MINOR,
-  'living_street': ROAD_MINOR,
-  'service':       ROAD_MINOR
-};
+var BBOX_RADIUS    = 0.12;            // degrees for station list
+var CACHE_TTL_MS   = 15 * 60 * 1000; // 15 min station cache
+var TILE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days tile cache
+var MAX_STATIONS   = 10;
+var DRIFT_KM       = 2.0;
+var TILE_ZOOM      = 15;              // OSM zoom level
+var IMG_CHUNK_BYTES = 2048;           // bytes per AppMessage chunk
 
 /* ----------------------------------------------------------
    Fuel type mapping
@@ -95,28 +77,49 @@ function fetchWithTimeout(url, options, timeoutMs) {
     var xhr    = new XMLHttpRequest();
     var method = (options && options.method) ? options.method : 'GET';
     xhr.open(method, url, true);
+
+    // Request binary response when needed
+    if (options && options.binary) {
+      xhr.responseType = 'arraybuffer';
+    }
+
     if (options && options.headers) {
       Object.keys(options.headers).forEach(function(k) {
         xhr.setRequestHeader(k, options.headers[k]);
       });
     }
-    var timer = setTimeout(function() { xhr.abort(); reject(new Error('Timeout')); }, timeoutMs);
+
+    var timer = setTimeout(function() {
+      xhr.abort();
+      reject(new Error('Timeout'));
+    }, timeoutMs);
+
     xhr.onload = function() {
       clearTimeout(timer);
-      var text = xhr.responseText;
-      resolve({
-        ok: xhr.status >= 200 && xhr.status < 300,
-        status: xhr.status,
-        text: function() { return Promise.resolve(text); },
-        json: function() {
-          return new Promise(function(res, rej) {
-            try { res(JSON.parse(text)); } catch(e) { rej(new Error('JSON parse error')); }
-          });
-        }
-      });
+      if (options && options.binary) {
+        resolve({
+          ok:     xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          buffer: xhr.response
+        });
+      } else {
+        var text = xhr.responseText;
+        resolve({
+          ok:     xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          json:   function() {
+            return new Promise(function(res, rej) {
+              try { res(JSON.parse(text)); } catch(e) { rej(new Error('JSON error')); }
+            });
+          }
+        });
+      }
     };
-    xhr.onerror = function() { clearTimeout(timer); reject(new Error('Network error')); };
-    xhr.send(options && options.body ? options.body : null);
+    xhr.onerror = function() {
+      clearTimeout(timer);
+      reject(new Error('Network error'));
+    };
+    xhr.send(null);
   });
 }
 
@@ -155,7 +158,7 @@ function parseStation(raw, lat, lon, anwbFuelType) {
       break;
     }
   }
-  var addr = raw.address || {};
+  var addr    = raw.address || {};
   var address = (addr.streetAddress || '') + (addr.city ? ', ' + addr.city : '');
   return {
     id:      raw.id,
@@ -169,158 +172,273 @@ function parseStation(raw, lat, lon, anwbFuelType) {
 }
 
 /* ----------------------------------------------------------
-   Overpass road fetch + geometry processing
+   OSM tile coordinate math
+   Converts lat/lon + zoom to tile x/y integers
 ---------------------------------------------------------- */
-function buildOverpassQuery(lat, lon) {
-  var r = MAP_BBOX_RADIUS;
-  var bbox = (lat - r).toFixed(6) + ',' + (lon - r).toFixed(6) + ',' +
-             (lat + r).toFixed(6) + ',' + (lon + r).toFixed(6);
-  return '[out:json][timeout:10];' +
-    'way[highway~"^(motorway|motorway_link|trunk|trunk_link|primary|primary_link|' +
-    'secondary|secondary_link|tertiary|tertiary_link|residential|unclassified|' +
-    'living_street|service)$"](' + bbox + ');' +
-    '(._;>;);out body;';
+function latLonToTile(lat, lon, zoom) {
+  var n = Math.pow(2, zoom);
+  var x = Math.floor((lon + 180) / 360 * n);
+  var latRad = lat * Math.PI / 180;
+  var y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return { x: x, y: y };
 }
 
-function fetchRoads(lat, lon) {
-  var query = buildOverpassQuery(lat, lon);
-  console.log('[FuelWatch] Fetching road data from Overpass');
-  return fetchWithTimeout(API_OVERPASS, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'data=' + encodeURIComponent(query)
-  }, 20000).then(function(r) {
-    if (!r.ok) throw new Error('Overpass HTTP ' + r.status);
-    return r.json();
-  });
+function tileUrl(z, x, y) {
+  return OSM_TILE.replace('{z}', z).replace('{x}', x).replace('{y}', y);
 }
 
-/* Douglas-Peucker line simplification */
-function perpendicularDist(pt, lineStart, lineEnd) {
-  var dx = lineEnd.lon - lineStart.lon;
-  var dy = lineEnd.lat - lineStart.lat;
-  var mag = Math.sqrt(dx * dx + dy * dy);
-  if (mag === 0) return 0;
-  return Math.abs(dy * pt.lon - dx * pt.lat + lineEnd.lon * lineStart.lat - lineEnd.lat * lineStart.lon) / mag;
-}
-
-function douglasPeucker(points, epsilon) {
-  if (points.length < 3) return points;
-  var maxDist = 0, maxIdx = 0;
-  for (var i = 1; i < points.length - 1; i++) {
-    var d = perpendicularDist(points[i], points[0], points[points.length - 1]);
-    if (d > maxDist) { maxDist = d; maxIdx = i; }
-  }
-  if (maxDist > epsilon) {
-    var left  = douglasPeucker(points.slice(0, maxIdx + 1), epsilon);
-    var right = douglasPeucker(points.slice(maxIdx), epsilon);
-    return left.slice(0, left.length - 1).concat(right);
-  }
-  return [points[0], points[points.length - 1]];
-}
-
-/* Project lat/lon to screen pixel — mirrors C-side projection */
-function projectToScreen(lat, lon, bbox, screenW, screenH) {
-  var padTop  = 16;
-  var padBot  = 2;
-  var padSide = 6;
-  var mapX0 = padSide;
-  var mapY0 = padTop;
-  var mapW  = screenW - padSide * 2;
-  var mapH  = screenH - padTop - padBot;
-
-  var x = mapX0 + (lon - bbox.minLon) / (bbox.maxLon - bbox.minLon) * mapW;
-  var y = mapY0 + (1 - (lat - bbox.minLat) / (bbox.maxLat - bbox.minLat)) * mapH;
-  return { x: Math.round(x), y: Math.round(y) };
-}
-
-/* Build bounding box for projection from station coords + own pos */
-function buildProjectionBbox(stations, sel, ownLat, ownLon) {
-  var pts = [
-    { lat: ownLat, lon: ownLon },
-    { lat: stations[sel].lat, lon: stations[sel].lon }
-  ];
-  if (sel > 0)
-    pts.push({ lat: stations[sel - 1].lat, lon: stations[sel - 1].lon });
-  if (sel < stations.length - 1)
-    pts.push({ lat: stations[sel + 1].lat, lon: stations[sel + 1].lon });
-
-  var minLat = pts[0].lat, maxLat = pts[0].lat;
-  var minLon = pts[0].lon, maxLon = pts[0].lon;
-  pts.forEach(function(p) {
-    if (p.lat < minLat) minLat = p.lat;
-    if (p.lat > maxLat) maxLat = p.lat;
-    if (p.lon < minLon) minLon = p.lon;
-    if (p.lon > maxLon) maxLon = p.lon;
-  });
-
-  var latSpan = maxLat - minLat;
-  var lonSpan = maxLon - minLon;
-  if (latSpan < 0.005) { var ml = (minLat + maxLat) / 2; minLat = ml - 0.0025; maxLat = ml + 0.0025; }
-  if (lonSpan < 0.005) { var mlo = (minLon + maxLon) / 2; minLon = mlo - 0.0025; maxLon = mlo + 0.0025; }
-
-  var pad = 0.20;
-  return {
-    minLat: minLat - latSpan * pad,
-    maxLat: maxLat + latSpan * pad,
-    minLon: minLon - lonSpan * pad,
-    maxLon: maxLon + lonSpan * pad
-  };
-}
-
-function processRoads(overpassData, stations, sel, ownLat, ownLon, screenW, screenH) {
-  var bbox     = buildProjectionBbox(stations, sel, ownLat, ownLon);
-  var nodeMap  = {};
-  var segments = [];
-
-  // Build node lookup
-  overpassData.elements.forEach(function(el) {
-    if (el.type === 'node') nodeMap[el.id] = { lat: el.lat, lon: el.lon };
-  });
-
-  // Process ways into segments
-  overpassData.elements.forEach(function(el) {
-    if (el.type !== 'way' || !el.tags || !el.tags.highway) return;
-    var roadType = ROAD_TYPE_MAP[el.tags.highway];
-    if (roadType === undefined) return;
-
-    // Build point array for this way
-    var points = [];
-    el.nodes.forEach(function(nid) {
-      if (nodeMap[nid]) points.push(nodeMap[nid]);
-    });
-    if (points.length < 2) return;
-
-    // Simplify — epsilon varies by road type
-    var epsilon = roadType === ROAD_MINOR ? 0.0002 : 0.0001;
-    var simplified = douglasPeucker(points, epsilon);
-
-    // Convert to screen segments
-    for (var i = 0; i < simplified.length - 1; i++) {
-      var p1 = projectToScreen(simplified[i].lat,     simplified[i].lon,     bbox, screenW, screenH);
-      var p2 = projectToScreen(simplified[i + 1].lat, simplified[i + 1].lon, bbox, screenW, screenH);
-      // Skip degenerate segments (same pixel)
-      if (p1.x === p2.x && p1.y === p2.y) continue;
-      segments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, t: roadType });
-    }
-  });
-
-  // Sort by road type (major first so they draw over minor)
-  // then limit total count
-  segments.sort(function(a, b) { return a.t - b.t; });
-  return segments.slice(0, MAX_ROAD_SEGS);
-}
-
-function packRoads(segments) {
-  return segments.map(function(s) {
-    return s.x1 + '|' + s.y1 + '|' + s.x2 + '|' + s.y2 + '|' + s.t;
-  }).join('\n');
+/* Calculate the lat/lon bounds of an OSM tile */
+function tileBounds(z, x, y) {
+  var n    = Math.pow(2, z);
+  var minLon = x / n * 360 - 180;
+  var maxLon = (x + 1) / n * 360 - 180;
+  var maxLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+  var minLat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+  return { minLat: minLat, maxLat: maxLat, minLon: minLon, maxLon: maxLon };
 }
 
 /* ----------------------------------------------------------
-   AppMessage packing
+   Convert ArrayBuffer PNG to Pebble bitmap bytes.
+   Colour platforms: GColor8 (1 byte/pixel, aarrggbb 2bpc)
+   B&W platforms:   1-bit packed (1 byte/8 pixels, MSB first)
+   Header: [w_hi, w_lo, h_hi, h_lo, bw_flag(0/1), pixels...]
+   Uses canvas + Floyd-Steinberg dithering (from ScaleMates).
 ---------------------------------------------------------- */
-/* AppMessage keys and status codes via messageKeys module */
+function pngToPebbleBitmap(arrayBuffer, targetW, targetH, isBW, bounds) {
+  return new Promise(function(resolve, reject) {
+    var blob = new Blob([arrayBuffer], { type: 'image/png' });
+    var url  = URL.createObjectURL(blob);
+    var img  = new Image();
+
+    img.onload = function() {
+      URL.revokeObjectURL(url);
+
+      var canvas  = document.createElement('canvas');
+      canvas.width  = targetW;
+      canvas.height = targetH;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, targetW, targetH);
+
+      var d = ctx.getImageData(0, 0, targetW, targetH).data;
+
+      /* Floyd-Steinberg dithering on greyscale (for B&W)
+         or per-channel (for colour) */
+      if (isBW) {
+        /* Convert to greyscale with error diffusion, output 1-bit packed */
+        var grey = new Float32Array(targetW * targetH);
+        for (var i = 0, p = 0; i < d.length; i += 4, p++) {
+          grey[p] = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
+        }
+
+        /* 1-bit: ceil(w/8) bytes per row */
+        /* Header: w(2) h(2) bw(1) minLat(4) maxLat(4) minLon(4) maxLon(4) = 19 bytes */
+        var minLatE6 = Math.round(bounds.minLat * 1e6);
+        var maxLatE6 = Math.round(bounds.maxLat * 1e6);
+        var minLonE6 = Math.round(bounds.minLon * 1e6);
+        var maxLonE6 = Math.round(bounds.maxLon * 1e6);
+        var stride  = Math.ceil(targetW / 8);
+        var pixBytes = stride * targetH;
+        var bytes   = new Uint8Array(21 + pixBytes);
+        bytes[0] = (targetW >> 8) & 0xFF;
+        bytes[1] =  targetW       & 0xFF;
+        bytes[2] = (targetH >> 8) & 0xFF;
+        bytes[3] =  targetH       & 0xFF;
+        bytes[4] = 1; /* B&W flag */
+        [minLatE6, maxLatE6, minLonE6, maxLonE6].forEach(function(v, i) {
+          var base = 5 + i * 4;
+          bytes[base]   = (v >> 24) & 0xFF;
+          bytes[base+1] = (v >> 16) & 0xFF;
+          bytes[base+2] = (v >>  8) & 0xFF;
+          bytes[base+3] =  v        & 0xFF;
+        });
+
+        for (var y = 0; y < targetH; y++) {
+          for (var x = 0; x < targetW; x++) {
+            var idx   = y * targetW + x;
+            var oldv  = grey[idx];
+            var newv  = oldv > 127 ? 255 : 0;
+            var qe    = oldv - newv;
+            grey[idx] = newv;
+
+            /* Distribute error */
+            if (x + 1 < targetW)              grey[idx + 1]          += qe * 7 / 16;
+            if (y + 1 < targetH) {
+              if (x > 0)                       grey[idx + targetW - 1] += qe * 3 / 16;
+                                               grey[idx + targetW]     += qe * 5 / 16;
+              if (x + 1 < targetW)             grey[idx + targetW + 1] += qe * 1 / 16;
+            }
+
+            /* Pack into byte: white=1, black=0; MSB = leftmost pixel */
+            if (newv > 127) {
+              bytes[5 + y * stride + Math.floor(x / 8)] |= (0x80 >> (x % 8));
+            }
+          }
+        }
+
+        console.log('[FuelWatch] Tile 1-bit ' + targetW + 'x' + targetH +
+                    ' -> ' + bytes.length + ' bytes');
+        resolve(bytes);
+
+      } else {
+        /* GColor8: Floyd-Steinberg per channel, 2bpc */
+        var err = new Float32Array(targetW * targetH * 3);
+        for (var i = 0, e = 0; i < d.length; i += 4, e += 3) {
+          err[e]     = d[i];
+          err[e + 1] = d[i + 1];
+          err[e + 2] = d[i + 2];
+        }
+
+        function diffuse(idx, amount) {
+          var v = err[idx] + amount;
+          err[idx] = v < 0 ? 0 : (v > 255 ? 255 : v);
+        }
+
+        /* Header: w(2) h(2) bw(1) minLat(4) maxLat(4) minLon(4) maxLon(4) = 19 bytes */
+        var minLatE6 = Math.round(bounds.minLat * 1e6);
+        var maxLatE6 = Math.round(bounds.maxLat * 1e6);
+        var minLonE6 = Math.round(bounds.minLon * 1e6);
+        var maxLonE6 = Math.round(bounds.maxLon * 1e6);
+        var bytes = new Uint8Array(21 + targetW * targetH);
+        bytes[0] = (targetW >> 8) & 0xFF;
+        bytes[1] =  targetW       & 0xFF;
+        bytes[2] = (targetH >> 8) & 0xFF;
+        bytes[3] =  targetH       & 0xFF;
+        bytes[4] = 0; /* colour flag */
+        /* bounds packed as int32 big-endian */
+        [minLatE6, maxLatE6, minLonE6, maxLonE6].forEach(function(v, i) {
+          var base = 5 + i * 4;
+          bytes[base]   = (v >> 24) & 0xFF;
+          bytes[base+1] = (v >> 16) & 0xFF;
+          bytes[base+2] = (v >>  8) & 0xFF;
+          bytes[base+3] =  v        & 0xFF;
+        });
+
+        var o = 21;
+        for (var y = 0; y < targetH; y++) {
+          for (var x = 0; x < targetW; x++) {
+            var base = (y * targetW + x) * 3;
+            var lvl  = [0, 0, 0];
+            for (var c = 0; c < 3; c++) {
+              var oldv = err[base + c];
+              var q    = (oldv / 85 + 0.5) | 0;
+              if (q < 0) q = 0; else if (q > 3) q = 3;
+              lvl[c]   = q;
+              var qe   = oldv - q * 85;
+              if (x + 1 < targetW)    diffuse(base + 3 + c,                  qe * 7 / 16);
+              if (y + 1 < targetH) {
+                var below = ((y + 1) * targetW + x) * 3 + c;
+                if (x > 0)            diffuse(below - 3,                      qe * 3 / 16);
+                                      diffuse(below,                          qe * 5 / 16);
+                if (x + 1 < targetW)  diffuse(below + 3,                      qe * 1 / 16);
+              }
+            }
+            bytes[o++] = 0xC0 | (lvl[0] << 4) | (lvl[1] << 2) | lvl[2];
+          }
+        }
+
+        console.log('[FuelWatch] Tile GColor8 ' + targetW + 'x' + targetH +
+                    ' -> ' + bytes.length + ' bytes');
+        resolve(bytes);
+      }
+    };
+
+    img.onerror = function() {
+      URL.revokeObjectURL(url);
+      reject(new Error('PNG decode failed'));
+    };
+    img.src = url;
+  });
+}
+
+/* ----------------------------------------------------------
+   Send tile chunks to watch (same pattern as ScaleMates)
+   chunk 0 carries the header bytes
+---------------------------------------------------------- */
+function sendTileChunk(tileBytes, chunkIdx, totalChunks) {
+  var start  = chunkIdx * IMG_CHUNK_BYTES;
+  var end    = Math.min(start + IMG_CHUNK_BYTES, tileBytes.length);
+  var chunk  = Array.from(tileBytes.subarray(start, end));
+
+  var msg = {};
+  msg[messageKeys.TileChunkI] = chunkIdx;
+  msg[messageKeys.TileChunkN] = totalChunks;
+  msg[messageKeys.TileData]   = chunk;
+
+  Pebble.sendAppMessage(msg,
+    function() {
+      console.log('[FuelWatch] Tile chunk ' + chunkIdx + '/' + totalChunks + ' sent');
+      if (chunkIdx + 1 < totalChunks) {
+        sendTileChunk(tileBytes, chunkIdx + 1, totalChunks);
+      } else {
+        console.log('[FuelWatch] Tile transfer complete');
+      }
+    },
+    function(e) {
+      console.warn('[FuelWatch] Chunk ' + chunkIdx + ' failed, retrying');
+      setTimeout(function() {
+        sendTileChunk(tileBytes, chunkIdx, totalChunks);
+      }, 500);
+    }
+  );
+}
+
+/* ----------------------------------------------------------
+   Map tile fetch + process pipeline
+---------------------------------------------------------- */
+function fetchAndSendTile(lat, lon, screenW, screenH, isBW) {
+  var tile   = latLonToTile(lat, lon, TILE_ZOOM);
+  var url    = tileUrl(TILE_ZOOM, tile.x, tile.y);
+
+  /* Map area dimensions (mirrors C-side MAP_PAD_* constants) */
+  var padTop  = 16;
+  var padBot  = 2;
+  var padSide = 6;
+  var mapW    = screenW - padSide * 2;
+  var mapH    = screenH - padTop - padBot;
+
+  /* Cache key: tile coords + B&W flag */
+  var cacheKey = 'fw_tile_' + TILE_ZOOM + '_' + tile.x + '_' + tile.y + '_' + (isBW ? '1' : '0');
+  var cached   = cacheGet(cacheKey);
+  var now      = Date.now();
+
+  if (cached && cached.ts && (now - cached.ts) < TILE_CACHE_TTL && cached.bytes) {
+    console.log('[FuelWatch] Using cached tile');
+    var bytes       = new Uint8Array(cached.bytes);
+    var totalChunks = Math.ceil(bytes.length / IMG_CHUNK_BYTES);
+    sendTileChunk(bytes, 0, totalChunks);
+    return;
+  }
+
+  var bounds = tileBounds(TILE_ZOOM, tile.x, tile.y);
+  console.log('[FuelWatch] Fetching OSM tile: ' + url);
+  fetchWithTimeout(url, { method: 'GET', binary: true }, 15000)
+    .then(function(r) {
+      if (!r.ok) throw new Error('Tile HTTP ' + r.status);
+      return pngToPebbleBitmap(r.buffer, mapW, mapH, isBW, bounds);
+    })
+    .then(function(bytes) {
+      /* Cache the processed bytes as regular array */
+      cacheSet(cacheKey, { bytes: Array.from(bytes), ts: now });
+
+      var totalChunks = Math.ceil(bytes.length / IMG_CHUNK_BYTES);
+      console.log('[FuelWatch] Sending tile: ' + bytes.length +
+                  ' bytes, ' + totalChunks + ' chunks');
+      sendTileChunk(bytes, 0, totalChunks);
+    })
+    .catch(function(err) {
+      console.error('[FuelWatch] Tile fetch failed: ' + err.message);
+      /* Send empty chunk to signal failure — C side hides loading overlay */
+      var msg = {};
+      msg[messageKeys.TileChunkI] = 0;
+      msg[messageKeys.TileChunkN] = 0;
+      msg[messageKeys.TileData]   = [];
+      Pebble.sendAppMessage(msg);
+    });
+}
+
+/* ----------------------------------------------------------
+   AppMessage packing — station list
+---------------------------------------------------------- */
 var STATUS_OK    = 0;
 var STATUS_ERROR = 1;
 
@@ -337,32 +455,21 @@ function packStation(s) {
 function sendToWatch(result) {
   var msg = {};
   if (result.status === 'ok') {
-    msg[messageKeys.STATUS]             = STATUS_OK;
-    msg[messageKeys.STATION]            = result.stations.map(packStation).join('\n');
-    msg[messageKeys.OWN_LAT]            = Math.round(result.lat * 1e6);
-    msg[messageKeys.OWN_LON]            = Math.round(result.lon * 1e6);
-    msg[messageKeys.FuelType]    = getFuelTypeSetting();
+    msg[messageKeys.STATUS]  = STATUS_OK;
+    msg[messageKeys.STATION] = result.stations.map(packStation).join('\n');
+    msg[messageKeys.OWN_LAT] = Math.round(result.lat * 1e6);
+    msg[messageKeys.OWN_LON] = Math.round(result.lon * 1e6);
   } else {
-    msg[messageKeys.STATUS]             = STATUS_ERROR;
-    msg[messageKeys.FuelType]    = getFuelTypeSetting();
+    msg[messageKeys.STATUS]  = STATUS_ERROR;
   }
   Pebble.sendAppMessage(msg,
     function() { console.log('[FuelWatch] AppMessage sent OK'); },
     function(e) { console.error('[FuelWatch] AppMessage failed: ' + e.error.message); });
 }
 
-function sendRoadsToWatch(segments) {
-  var msg = {};
-  msg[messageKeys.Roads] = packRoads(segments);
-  Pebble.sendAppMessage(msg,
-    function() { console.log('[FuelWatch] Roads sent: ' + segments.length + ' segs'); },
-    function(e) { console.error('[FuelWatch] Roads send failed: ' + e.error.message); });
-}
-
 /* ----------------------------------------------------------
    Core refresh — station list
 ---------------------------------------------------------- */
-// Store last known station list + own position for map requests
 var s_lastStations = null;
 var s_lastLat      = null;
 var s_lastLon      = null;
@@ -403,11 +510,10 @@ function refresh(lat, lon) {
     cacheSet(cacheKey, { stations: stations, ts: now });
     s_lastStations = stations;
     s_lastLat = lat; s_lastLon = lon;
-
     cacheSet('fw_last_lat', lat);
     cacheSet('fw_last_lon', lon);
-
     sendToWatch({ status: 'ok', stations: stations, lat: lat, lon: lon });
+
   }).catch(function(err) {
     console.error('[FuelWatch] Refresh failed: ' + err.message);
     sendToWatch({ status: 'error', code: 'fetch_failed' });
@@ -416,42 +522,16 @@ function refresh(lat, lon) {
 
 /* ----------------------------------------------------------
    Map request handler
-   Fetches Overpass road data and sends pre-projected segments
 ---------------------------------------------------------- */
-function handleMapRequest(selectedIndex, screenW, screenH) {
+function handleMapRequest(selectedIndex, screenW, screenH, isBW) {
   if (!s_lastStations || s_lastStations.length === 0) {
     console.warn('[FuelWatch] Map request but no station data');
-    sendRoadsToWatch([]);
     return;
   }
-
-  var lat = s_lastLat;
-  var lon = s_lastLon;
   var sel = Math.min(selectedIndex, s_lastStations.length - 1);
-
-  // Cache roads by position + selected station
-  var roadCacheKey = 'fw_roads_' +
-    Math.round(lat * 1000) + '_' + Math.round(lon * 1000) + '_' + sel;
-  var cached = cacheGet(roadCacheKey);
-  var now    = Date.now();
-
-  if (cached && cached.ts && (now - cached.ts) < ROAD_CACHE_TTL) {
-    console.log('[FuelWatch] Using cached road data');
-    sendRoadsToWatch(cached.segments);
-    return;
-  }
-
-  fetchRoads(lat, lon).then(function(data) {
-    var segments = processRoads(data, s_lastStations, sel,
-                                lat, lon, screenW, screenH);
-    console.log('[FuelWatch] Processed ' + segments.length + ' road segments');
-    cacheSet(roadCacheKey, { segments: segments, ts: now });
-    sendRoadsToWatch(segments);
-  }).catch(function(err) {
-    console.error('[FuelWatch] Overpass failed: ' + err.message);
-    // Send empty roads — map still shows dots
-    sendRoadsToWatch([]);
-  });
+  var lat = s_lastStations[sel].lat;
+  var lon = s_lastStations[sel].lon;
+  fetchAndSendTile(lat, lon, screenW, screenH, isBW);
 }
 
 /* ----------------------------------------------------------
@@ -479,7 +559,7 @@ function getLocation() {
           try {
             var keys = Object.keys(localStorage);
             keys.forEach(function(k) {
-              if (k.indexOf('fw_anwb_') === 0 || k.indexOf('fw_roads_') === 0)
+              if (k.indexOf('fw_anwb_') === 0 || k.indexOf('fw_tile_') === 0)
                 localStorage.removeItem(k);
             });
           } catch(e) {}
@@ -500,25 +580,33 @@ function getLocation() {
 ---------------------------------------------------------- */
 Pebble.addEventListener('ready', function() {
   console.log('[FuelWatch] PebbleKit JS ready');
+  // Clear tile cache on every startup to avoid stale cached data
+  try {
+    var keys = Object.keys(localStorage);
+    keys.forEach(function(k) {
+      if (k.indexOf('fw_tile_') === 0) localStorage.removeItem(k);
+    });
+  } catch(e) {}
   getLocation();
 });
 
 Pebble.addEventListener('appmessage', function(e) {
   var payload = e.payload;
-  console.log('[FuelWatch] appmessage received');
+  /* Inbound from watch: keys are STRING names.
+     Outbound to watch: use numeric messageKeys.X values. */
+  console.log('[FuelWatch] appmessage: ' + JSON.stringify(payload));
 
-  // Map request from watch
-  if (payload[messageKeys.MapRequest]) {
-    var sel     = payload[messageKeys.MapSelected] || 0;
-    var screenW = payload[messageKeys.MapScreenW]  || 144;
-    var screenH = payload[messageKeys.MapScreenH]  || 168;
+  if (typeof payload.MapRequest !== 'undefined') {
+    var sel     = parseInt(payload.MapSelected, 10) || 0;
+    var screenW = parseInt(payload.MapScreenW,  10) || 144;
+    var screenH = parseInt(payload.MapScreenH,  10) || 168;
+    var isBW    = payload.MapBW === 1 || payload.MapBW === '1';
     console.log('[FuelWatch] Map request: sel=' + sel +
-                ' screen=' + screenW + 'x' + screenH);
-    handleMapRequest(sel, screenW, screenH);
+                ' ' + screenW + 'x' + screenH + ' bw=' + isBW);
+    handleMapRequest(sel, screenW, screenH, isBW);
     return;
   }
 
-  // Generic refresh request
   console.log('[FuelWatch] Refresh requested');
   getLocation();
 });

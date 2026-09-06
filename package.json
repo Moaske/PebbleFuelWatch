@@ -22,7 +22,10 @@
             "MapScreenW",
             "MapScreenH",
             "MapSelected",
-            "Roads"
+            "TileChunkI",
+            "TileChunkN",
+            "TileData",
+            "MapBW"
         ],
         "projectType": "native",
         "resources": {
@@ -103,5 +106,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.4"
+    "version": "1.0.5"
 }
