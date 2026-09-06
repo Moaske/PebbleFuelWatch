@@ -17,7 +17,12 @@
             "STATION",
             "OWN_LAT",
             "OWN_LON",
-            "FuelType"
+            "FuelType",
+            "MapRequest",
+            "MapScreenW",
+            "MapScreenH",
+            "MapSelected",
+            "Roads"
         ],
         "projectType": "native",
         "resources": {
@@ -98,5 +103,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.2"
+    "version": "1.0.4"
 }
