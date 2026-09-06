@@ -17,14 +17,15 @@ var clay        = new Clay(clayConfig);
 ---------------------------------------------------------- */
 var API_ANWB   = 'https://api.anwb.nl/routing/points-of-interest/v3/all';
 var API_TYPE   = 'FUEL_STATION';
-var OSM_TILE   = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+var OSM_TILE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 var BBOX_RADIUS    = 0.12;            // degrees for station list
 var CACHE_TTL_MS   = 15 * 60 * 1000; // 15 min station cache
-var TILE_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days tile cache
+var TILE_CACHE_TTL = 60 * 60 * 1000; // 1 hour tile cache (increase after tuning)
 var MAX_STATIONS   = 10;
 var DRIFT_KM       = 2.0;
-var TILE_ZOOM      = 15;              // OSM zoom level
+var TILE_ZOOM_MAX  = 15;              // OSM zoom level (street detail)
+var TILE_ZOOM_MIN  = 13;              // OSM zoom level (wider area)
 var IMG_CHUNK_BYTES = 2048;           // bytes per AppMessage chunk
 
 /* ----------------------------------------------------------
@@ -270,7 +271,7 @@ function pngToPebbleBitmap(arrayBuffer, targetW, targetH, isBW, bounds) {
 
             /* Pack into byte: white=1, black=0; MSB = leftmost pixel */
             if (newv > 127) {
-              bytes[5 + y * stride + Math.floor(x / 8)] |= (0x80 >> (x % 8));
+              bytes[21 + y * stride + Math.floor(x / 8)] |= (1 << (x % 8));
             }
           }
         }
@@ -385,9 +386,10 @@ function sendTileChunk(tileBytes, chunkIdx, totalChunks) {
 /* ----------------------------------------------------------
    Map tile fetch + process pipeline
 ---------------------------------------------------------- */
-function fetchAndSendTile(lat, lon, screenW, screenH, isBW) {
-  var tile   = latLonToTile(lat, lon, TILE_ZOOM);
-  var url    = tileUrl(TILE_ZOOM, tile.x, tile.y);
+function fetchAndSendTile(lat, lon, screenW, screenH, isBW, zoom, sel) {
+  zoom = zoom || TILE_ZOOM_MAX;
+  var tile   = latLonToTile(lat, lon, zoom);
+  var url    = tileUrl(zoom, tile.x, tile.y);
 
   /* Map area dimensions (mirrors C-side MAP_PAD_* constants) */
   var padTop  = 16;
@@ -396,8 +398,10 @@ function fetchAndSendTile(lat, lon, screenW, screenH, isBW) {
   var mapW    = screenW - padSide * 2;
   var mapH    = screenH - padTop - padBot;
 
-  /* Cache key: tile coords + B&W flag */
-  var cacheKey = 'fw_tile_' + TILE_ZOOM + '_' + tile.x + '_' + tile.y + '_' + (isBW ? '1' : '0');
+  /* Cache key includes selected station so different stations
+     always get their own tile even if they share the same tile coords */
+  var cacheKey = 'fw_tile_' + zoom + '_' + tile.x + '_' + tile.y +
+                 '_s' + (sel || 0) + '_' + (isBW ? '1' : '0');
   var cached   = cacheGet(cacheKey);
   var now      = Date.now();
 
@@ -409,7 +413,7 @@ function fetchAndSendTile(lat, lon, screenW, screenH, isBW) {
     return;
   }
 
-  var bounds = tileBounds(TILE_ZOOM, tile.x, tile.y);
+  var bounds = tileBounds(zoom, tile.x, tile.y);
   console.log('[FuelWatch] Fetching OSM tile: ' + url);
   fetchWithTimeout(url, { method: 'GET', binary: true }, 15000)
     .then(function(r) {
@@ -523,15 +527,32 @@ function refresh(lat, lon) {
 /* ----------------------------------------------------------
    Map request handler
 ---------------------------------------------------------- */
+
+/* Pick zoom so both own position and station fit in one tile with padding.
+   At zoom 15 tile ~1.2km, zoom 14 ~2.5km, zoom 13 ~5km */
+function pickZoom(lat1, lon1, lat2, lon2) {
+  var dist = haversine(lat1, lon1, lat2, lon2);
+  if (dist < 0.55) return 15;
+  if (dist < 1.2)  return 14;
+  return 13;
+}
+
 function handleMapRequest(selectedIndex, screenW, screenH, isBW) {
   if (!s_lastStations || s_lastStations.length === 0) {
     console.warn('[FuelWatch] Map request but no station data');
     return;
   }
-  var sel = Math.min(selectedIndex, s_lastStations.length - 1);
-  var lat = s_lastStations[sel].lat;
-  var lon = s_lastStations[sel].lon;
-  fetchAndSendTile(lat, lon, screenW, screenH, isBW);
+  var sel  = Math.min(selectedIndex, s_lastStations.length - 1);
+  var stn  = s_lastStations[sel];
+  var zoom = pickZoom(s_lastLat, s_lastLon, stn.lat, stn.lon);
+  /* Bias midpoint 60% toward own position so tile covers more
+     of the area between us and the station */
+  var midLat = s_lastLat * 0.6 + stn.lat * 0.4;
+  var midLon = s_lastLon * 0.6 + stn.lon * 0.4;
+  var dist = haversine(s_lastLat, s_lastLon, stn.lat, stn.lon);
+  console.log('[FuelWatch] Map: dist=' + dist.toFixed(2) + 'km zoom=' + zoom);
+  /* Always use 1-bit B&W, tile centred on midpoint */
+  fetchAndSendTile(midLat, midLon, screenW, screenH, true, zoom, sel);
 }
 
 /* ----------------------------------------------------------

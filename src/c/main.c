@@ -162,7 +162,7 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
         int bw = data[4];
         size_t px_bytes = bw ? ((size_t)((w + 7) / 8) * h)
                              : ((size_t)w * h);
-        size_t calc = 5 + px_bytes;
+        size_t calc = 21 + px_bytes;
         if (calc > 0 && calc <= TILE_BUF_MAX) exact = calc;
       }
       s_tile_buf      = malloc(exact);

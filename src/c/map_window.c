@@ -53,7 +53,7 @@ typedef struct {
   float map_x0, map_y0, map_w, map_h;
 } Proj;
 
-static Proj build_proj(int32_t (*pts)[2], int count, GRect bounds) {
+static Proj build_proj(GRect bounds) {
   Proj p;
   p.map_x0 = bounds.origin.x + MAP_PAD_SIDE;
   p.map_y0 = bounds.origin.y + MAP_PAD_TOP;
@@ -61,24 +61,31 @@ static Proj build_proj(int32_t (*pts)[2], int count, GRect bounds) {
   p.map_h  = bounds.size.h - MAP_PAD_TOP - MAP_PAD_BOT;
 
   if (s_tile_has_bounds) {
-    /* Use exact tile bounds so dots align with tile pixels */
-    p.min_lat = s_tile_min_lat;
-    p.max_lat = s_tile_max_lat;
-    p.min_lon = s_tile_min_lon;
-    p.max_lon = s_tile_max_lon;
+    /* Use tile bounds with 5% padding so points near the tile edge
+       don't project right to the screen boundary */
+    float lat_span = s_tile_max_lat - s_tile_min_lat;
+    float lon_span = s_tile_max_lon - s_tile_min_lon;
+    float lat_pad  = lat_span * 0.15f;
+    float lon_pad  = lon_span * 0.15f;
+    p.min_lat = s_tile_min_lat - lat_pad;
+    p.max_lat = s_tile_max_lat + lat_pad;
+    p.min_lon = s_tile_min_lon - lon_pad;
+    p.max_lon = s_tile_max_lon + lon_pad;
   } else {
-    /* Fallback: derive bounds from station coordinates */
-    float minLat =  999.f, maxLat = -999.f;
-    float minLon =  999.f, maxLon = -999.f;
-    for (int i = 0; i < count; i++) {
-      float lat = pts[i][0] / 1000000.f;
-      float lon = pts[i][1] / 1000000.f;
-      if (lat < minLat) { minLat = lat; } if (lat > maxLat) { maxLat = lat; }
-      if (lon < minLon) { minLon = lon; } if (lon > maxLon) { maxLon = lon; }
-    }
+    /* Fallback: simple bbox around own pos and selected station */
+    AppState *state = app_state_get();
+    uint8_t   sel   = state->selected_index;
+    float ownLat = state->own_lat_e6 / 1000000.f;
+    float ownLon = state->own_lon_e6 / 1000000.f;
+    float stnLat = state->stations[sel].lat_e6 / 1000000.f;
+    float stnLon = state->stations[sel].lon_e6 / 1000000.f;
+    float minLat = ownLat < stnLat ? ownLat : stnLat;
+    float maxLat = ownLat > stnLat ? ownLat : stnLat;
+    float minLon = ownLon < stnLon ? ownLon : stnLon;
+    float maxLon = ownLon > stnLon ? ownLon : stnLon;
     float ls = maxLat - minLat, lo = maxLon - minLon;
     if (ls < 0.005f) { float m=(minLat+maxLat)/2; minLat=m-0.0025f; maxLat=m+0.0025f; }
-    if (lo < 0.005f) { float m=(minLon+maxLon)/2; minLon=m-0.0025f; maxLon=m+0.0025f; lo=0.005f; }
+    if (lo < 0.005f) { float m=(minLon+maxLon)/2; minLon=m-0.0025f; maxLon=m+0.0025f; }
     p.min_lat = minLat - ls*BBOX_PAD; p.max_lat = maxLat + ls*BBOX_PAD;
     p.min_lon = minLon - lo*BBOX_PAD; p.max_lon = maxLon + lo*BBOX_PAD;
   }
@@ -98,24 +105,36 @@ static GPoint proj_point(Proj *p, int32_t lat_e6, int32_t lon_e6) {
 ---------------------------------------------------------- */
 static void draw_station_dot(GContext *ctx, GPoint pt, const char *label,
                               uint8_t r, bool selected) {
+  /* White halo behind dot so it's visible over any tile content */
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_circle(ctx, pt, r + 2);
+
 #ifdef PBL_COLOR
   graphics_context_set_fill_color(ctx, selected ? GColorCobaltBlue : GColorDarkGray);
 #else
   graphics_context_set_fill_color(ctx, GColorBlack);
 #endif
   graphics_fill_circle(ctx, pt, r);
+
   if (selected) {
 #ifdef PBL_COLOR
     graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
 #else
     graphics_context_set_stroke_color(ctx, GColorBlack);
 #endif
-    graphics_draw_circle(ctx, pt, r + 2);
+    graphics_draw_circle(ctx, pt, r + 3);
   }
+
+  /* White background box behind label for readability over tile */
+  GRect label_rect = GRect(pt.x - LABEL_W/2,
+                           pt.y - r - LABEL_OFFSET_Y - LABEL_H,
+                           LABEL_W, LABEL_H);
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, label_rect, 0, GCornerNone);
   graphics_context_set_text_color(ctx, GColorBlack);
   graphics_draw_text(ctx, label,
     fonts_get_system_font(FONT_KEY_GOTHIC_14),
-    GRect(pt.x - LABEL_W/2, pt.y - r - LABEL_OFFSET_Y - LABEL_H, LABEL_W, LABEL_H),
+    label_rect,
     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
 }
 
@@ -135,7 +154,21 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect tile_rect = GRect(MAP_PAD_SIDE, MAP_PAD_TOP,
                             bounds.size.w - MAP_PAD_SIDE * 2,
                             bounds.size.h - MAP_PAD_TOP - MAP_PAD_BOT);
+    /* For 1-bit bitmaps on colour displays: set context colours so
+       1-bits render as black (roads/features) on white background */
+    /* GCompOpAssign copies bitmap pixels directly to display.
+       For 1-bit on colour: Pebble uses current fill_color for 0-bits
+       and stroke_color for 1-bits. Set black-on-white explicitly. */
+    graphics_context_set_stroke_color(ctx, GColorBlack);
+    graphics_context_set_fill_color(ctx,  GColorWhite);
+#ifdef PBL_COLOR
+    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
+#endif
     graphics_draw_bitmap_in_rect(ctx, s_tile_bitmap, tile_rect);
+    /* Reset compositing mode for subsequent drawing */
+#ifdef PBL_COLOR
+    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
+#endif
   }
 
   /* --- Title bar --------------------------------------- */
@@ -155,37 +188,29 @@ static void canvas_update_proc(Layer *layer, GContext *ctx) {
     GRect(4, 1, bounds.size.w - 8, MAP_PAD_TOP - 2),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
 
-  /* --- Station dots ------------------------------------ */
-  int idx_a = (sel > 0)                  ? sel - 1 : -1;
-  int idx_b = sel;
-  int idx_c = (sel < state->count - 1)   ? sel + 1 : -1;
+  /* --- Two dots: selected station + own position ------- */
+  Proj proj = build_proj(bounds);
 
-  int32_t pts[4][2];
-  pts[0][0] = state->own_lat_e6; pts[0][1] = state->own_lon_e6;
-  pts[1][0] = state->stations[idx_b].lat_e6; pts[1][1] = state->stations[idx_b].lon_e6;
-  pts[2][0] = idx_a>=0 ? state->stations[idx_a].lat_e6 : pts[1][0];
-  pts[2][1] = idx_a>=0 ? state->stations[idx_a].lon_e6 : pts[1][1];
-  pts[3][0] = idx_c>=0 ? state->stations[idx_c].lat_e6 : pts[1][0];
-  pts[3][1] = idx_c>=0 ? state->stations[idx_c].lon_e6 : pts[1][1];
-
-  Proj proj = build_proj(pts, 4, bounds);
-
-  if (idx_a >= 0) {
-    GPoint pa = proj_point(&proj, state->stations[idx_a].lat_e6,
-                                  state->stations[idx_a].lon_e6);
-    draw_station_dot(ctx, pa, state->stations[idx_a].name, DOT_ADJACENT, false);
-  }
-  if (idx_c >= 0) {
-    GPoint pc = proj_point(&proj, state->stations[idx_c].lat_e6,
-                                  state->stations[idx_c].lon_e6);
-    draw_station_dot(ctx, pc, state->stations[idx_c].name, DOT_ADJACENT, false);
-  }
-  GPoint pb = proj_point(&proj, state->stations[idx_b].lat_e6,
-                                state->stations[idx_b].lon_e6);
+  /* Selected station */
+  GPoint pb = proj_point(&proj, stn->lat_e6, stn->lon_e6);
   draw_station_dot(ctx, pb, stn->name, DOT_SELECTED, true);
 
-  /* Own position crosshair */
+  /* Own position crosshair — white halo first for visibility over tile */
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "Own pos e6: %ld,%ld bounds: %.4f-%.4f / %.4f-%.4f",
+          (long)state->own_lat_e6, (long)state->own_lon_e6,
+          (double)proj.min_lat, (double)proj.max_lat,
+          (double)proj.min_lon, (double)proj.max_lon);
   GPoint own = proj_point(&proj, state->own_lat_e6, state->own_lon_e6);
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "Own pixel: %d,%d screen: %dx%d",
+          (int)own.x, (int)own.y,
+          (int)(proj.map_x0 + proj.map_w), (int)(proj.map_y0 + proj.map_h));
+  graphics_context_set_stroke_color(ctx, GColorWhite);
+  graphics_context_set_fill_color(ctx,  GColorWhite);
+  graphics_fill_circle(ctx, own, DOT_OWN + 2);
+  graphics_draw_line(ctx, GPoint(own.x - CROSSHAIR_ARM - 1, own.y),
+                          GPoint(own.x + CROSSHAIR_ARM + 1, own.y));
+  graphics_draw_line(ctx, GPoint(own.x, own.y - CROSSHAIR_ARM - 1),
+                          GPoint(own.x, own.y + CROSSHAIR_ARM + 1));
 #ifdef PBL_COLOR
   graphics_context_set_stroke_color(ctx, GColorRed);
   graphics_context_set_fill_color(ctx,  GColorRed);
@@ -255,10 +280,14 @@ static void create_bitmap_from_tile(const uint8_t *buf, size_t len) {
   }
   GBitmap *bmp = gbitmap_create_blank(GSize(w, h), GBitmapFormat1Bit);
   if (!bmp) { APP_LOG(APP_LOG_LEVEL_ERROR, "1-bit bitmap alloc failed"); return; }
-  uint8_t  *dst    = gbitmap_get_data(bmp);
-  uint16_t  stride = gbitmap_get_bytes_per_row(bmp);
+  uint8_t  *dst       = gbitmap_get_data(bmp);
+  uint16_t  dst_stride = gbitmap_get_bytes_per_row(bmp);
+  /* dst_stride may be padded to 4-byte boundary (e.g. 28 for w=188)
+     src_stride is exactly ceil(w/8) = 24 bytes — copy only src bytes per row */
+  APP_LOG(APP_LOG_LEVEL_DEBUG, "Strides: src=%d dst=%d", src_stride, (int)dst_stride);
   for (int y = 0; y < h; y++) {
-    memcpy(dst + (size_t)y * stride,
+    memset(dst + (size_t)y * dst_stride, 0, dst_stride);  // clear padding bytes
+    memcpy(dst + (size_t)y * dst_stride,
            px  + (size_t)y * src_stride,
            src_stride);
   }
