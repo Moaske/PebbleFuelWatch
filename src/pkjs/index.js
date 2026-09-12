@@ -628,6 +628,18 @@ Pebble.addEventListener('appmessage', function(e) {
     return;
   }
 
+  // Navigate request — open geo: URI on phone
+  if (typeof payload.Navigate !== 'undefined') {
+    var parts = String(payload.Navigate).split(',');
+    var lat = parseInt(parts[0], 10) / 1e6;
+    var lon = parseInt(parts[1], 10) / 1e6;
+    var uri = 'https://www.google.com/maps/search/?api=1&query=' +
+              lat.toFixed(6) + ',' + lon.toFixed(6);
+    console.log('[FuelWatch] Navigate: ' + uri);
+    Pebble.openURL(uri);
+    return;
+  }
+
   console.log('[FuelWatch] Refresh requested');
   getLocation();
 });

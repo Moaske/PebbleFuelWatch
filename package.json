@@ -25,11 +25,31 @@
             "TileChunkI",
             "TileChunkN",
             "TileData",
-            "MapBW"
+            "MapBW",
+            "Navigate"
         ],
         "projectType": "native",
         "resources": {
             "media": [
+                {
+                    "file": "images/navigate_icon25.png",
+                    "name": "NAVIGATE_ICON25",
+                    "targetPlatforms": [
+                        "emery"
+                    ],
+                    "type": "bitmap"
+                },
+                {
+                    "file": "images/navigate_icon18.png",
+                    "name": "NAVIGATE_ICON18",
+                    "targetPlatforms": [
+                        "aplite",
+                        "basalt",
+                        "diorite",
+                        "flint"
+                    ],
+                    "type": "bitmap"
+                },
                 {
                     "file": "fonts/segoeui.ttf",
                     "name": "FONT_SEGOEUI_18",
@@ -106,5 +126,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.8"
+    "version": "1.0.10"
 }
