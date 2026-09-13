@@ -16,7 +16,7 @@ I have a Time 2, but none of the others. So Basalt, Diorite and Flint were built
 <img src="https://github.com/Moaske/PebbleFuelWatch/blob/main/docs/main.png"></img>&nbsp;&nbsp;&nbsp;<img src="https://github.com/Moaske/PebbleFuelWatch/blob/main/docs/map.png"></img>&nbsp;&nbsp;&nbsp;<img src="https://github.com/Moaske/PebbleFuelWatch/blob/main/docs/detail.png"></img>
 
 ### Coverage / credits
-Fuel station data by the dutch ANWB (copyright). Should provide data in the following EU countries: <br>NL, BE, LU, DE, FR, ES, PT, IT, CH, DK, NO, SE, FI, GB, TR, UA, RU.
+Fuel station data by the dutch ANWB (copyright). Should provide data in and of the following countries (so most of EU):<br>NL, BE, LU, DE, FR, ES, PT, IT, CH, DK, NO, SE, FI, GB, TR, UA, RU.
 <br>Location by your phone 😏. <br>Map tiles by Open Street Maps.
 
 ## Phone settings
