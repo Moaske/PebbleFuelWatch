@@ -105,10 +105,7 @@
                     "file": "fonts/segoeuib.ttf",
                     "name": "FONT_SEGOEUIB_24",
                     "targetPlatforms": [
-                        "basalt",
-                        "diorite",
-                        "emery",
-                        "flint"
+                        "emery"
                     ],
                     "type": "font"
                 },
@@ -133,5 +130,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.12"
+    "version": "1.0.13"
 }

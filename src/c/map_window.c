@@ -26,13 +26,15 @@ void tile_buf_free(void);
 #ifdef PBL_PLATFORM_EMERY
   #define HDR_TEXT_Y     4    /* centres the label in the 32px bar */
   #define ROW_H         36
-  #define VALUE_DROP     5    /* 24px value vs 20px label baseline */
+  #define VALUE_FALLBACK FONT_KEY_GOTHIC_24_BOLD
   #define SIDE_PAD       8
+  #define COUNTER_H     20
 #else
   #define HDR_TEXT_Y     1    /* centres the label in the 19px bar */
-  #define ROW_H         30
-  #define VALUE_DROP     4    /* 24px value vs 18px label baseline */
+  #define ROW_H         24   /* tight enough to free a 3rd address line */
+  #define VALUE_FALLBACK FONT_KEY_GOTHIC_18_BOLD
   #define SIDE_PAD       6
+  #define COUNTER_H     20
 #endif
 
 #define BBOX_PAD        0.15f
@@ -84,11 +86,9 @@ static void fonts_load_all(void) {
   s_font_addr   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
   s_font_label  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_18));
   s_font_small  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_14));
+  /* Value font matches the label size here, so both rows sit level */
   s_font_value  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
 #endif
-  /* Price and distance values keep the same size on every platform */
-  
-
   APP_LOG(APP_LOG_LEVEL_INFO, "Map fonts loaded, heap=%d", (int)heap_bytes_free());
 }
 
@@ -120,6 +120,13 @@ static void format_dist(char *buf, size_t len, uint32_t dist_m) {
              (unsigned)(dist_m / 1000),
              (unsigned)((dist_m % 1000) / 100));
   }
+}
+
+/* Width/height a string needs in a given font */
+static GSize measure(const char *s, GFont f, int16_t w) {
+  return graphics_text_layout_get_content_size(
+           s, f, GRect(0, 0, w, 60),
+           GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
 }
 
 /* ----------------------------------------------------------
@@ -244,11 +251,11 @@ static void draw_detail(GContext *ctx, GRect bounds, Station *stn) {
      change. TrailingEllipsis wraps and marks any genuine overflow. */
   GFont addr_font  = fnt(s_font_addr, FONT_KEY_GOTHIC_18_BOLD);
   int16_t max_addr_h = bounds.size.h
-                     - 24            /* position counter strip */
+                     - COUNTER_H     /* position counter strip */
                      - (MAP_PAD_TOP + 4)
-                     - 5             /* separator */
+                     - 4             /* separator */
                      - ROW_H * 2     /* price + distance rows */
-                     - 6;            /* gap below address */
+                     - 4;            /* gap below address */
   if (max_addr_h < 20) max_addr_h = 20;
 
   GSize addr_size = graphics_text_layout_get_content_size(
@@ -260,7 +267,7 @@ static void draw_detail(GContext *ctx, GRect bounds, Station *stn) {
   graphics_draw_text(ctx, stn->address, addr_font,
     GRect(SIDE_PAD, y, avail, addr_size.h + 4),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-  y += addr_size.h + 6;
+  y += addr_size.h + 4;
 
   /* --- Separator --- */
 #ifdef PBL_COLOR
@@ -269,35 +276,56 @@ static void draw_detail(GContext *ctx, GRect bounds, Station *stn) {
   graphics_context_set_stroke_color(ctx, GColorBlack);
 #endif
   graphics_draw_line(ctx, GPoint(SIDE_PAD, y), GPoint(w - SIDE_PAD, y));
-  y += 5;
+  y += 4;
 
   GFont label_font = fnt(s_font_label, FONT_KEY_GOTHIC_18);
-  GFont value_font = fnt(s_font_value, FONT_KEY_GOTHIC_24_BOLD);
-  int16_t label_w  = avail / 2;
-  int16_t value_w  = avail - label_w;
+  GFont value_font = fnt(s_font_value, VALUE_FALLBACK);
 
-  /* --- Fuel type / price --- */
   char price_buf[12];
+  char dist_buf[16];
   format_price(price_buf, sizeof(price_buf), stn->fuel_mills);
+  format_dist(dist_buf,  sizeof(dist_buf),  stn->dist_m);
+
+  /* The value column takes exactly what the wider of the two values
+     needs; the label keeps the rest. If the full word will not fit
+     next to it, drop to the short form rather than ellipsising. */
+  const int16_t gutter = 6;
+  GSize   ps      = measure(price_buf, value_font, avail);
+  GSize   ds      = measure(dist_buf,  value_font, avail);
+  int16_t value_w = (ps.w > ds.w ? ps.w : ds.w) + 4;
+  int16_t cap     = (avail * 3) / 5;           /* never eat the label */
+  if (value_w > cap) value_w = cap;
+  int16_t label_w = avail - value_w - gutter;
+
+  const char *dist_label = "Distance";
+  GSize ls = measure(dist_label, label_font, avail);
+  if (ls.w > label_w) {
+    dist_label = "Dist";
+    ls = measure(dist_label, label_font, avail);
+  }
+
+  /* Centre both columns vertically in the row from their real heights */
+  int16_t label_dy = (ROW_H - ls.h) / 2; if (label_dy < 0) label_dy = 0;
+  int16_t value_dy = (ROW_H - ps.h) / 2; if (value_dy < 0) value_dy = 0;
+  int16_t value_x  = SIDE_PAD + label_w + gutter;
 
   graphics_context_set_text_color(ctx, GColorBlack);
+
+  /* --- Fuel type / price --- */
   graphics_draw_text(ctx, fuel_type_label(state->fuel_type), label_font,
-    GRect(SIDE_PAD, y, label_w, ROW_H),
+    GRect(SIDE_PAD, y + label_dy, label_w, ROW_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   graphics_draw_text(ctx, price_buf, value_font,
-    GRect(SIDE_PAD + label_w, y - VALUE_DROP, value_w, ROW_H),
+    GRect(value_x, y + value_dy, value_w, ROW_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
   y += ROW_H;
 
   /* --- Distance --- */
-  char dist_buf[16];
-  format_dist(dist_buf, sizeof(dist_buf), stn->dist_m);
-
-  graphics_draw_text(ctx, "Distance", label_font,
-    GRect(SIDE_PAD, y, label_w, ROW_H),
+  graphics_draw_text(ctx, dist_label, label_font,
+    GRect(SIDE_PAD, y + label_dy, label_w, ROW_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
   graphics_draw_text(ctx, dist_buf, value_font,
-    GRect(SIDE_PAD + label_w, y - VALUE_DROP, value_w, ROW_H),
+    GRect(value_x, y + value_dy, value_w, ROW_H),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 
   /* --- Position counter, bottom right --- */
@@ -311,7 +339,7 @@ static void draw_detail(GContext *ctx, GRect bounds, Station *stn) {
 #endif
   graphics_draw_text(ctx, pos_buf,
     fnt(s_font_small, FONT_KEY_GOTHIC_14),
-    GRect(SIDE_PAD, bounds.size.h - 24, avail, 22),
+    GRect(SIDE_PAD, bounds.size.h - COUNTER_H, avail, COUNTER_H - 2),
     GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
 }
 
