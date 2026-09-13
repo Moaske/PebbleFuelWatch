@@ -97,6 +97,8 @@ void send_map_request(void) {
   dict_write_int16(out, MESSAGE_KEY_MapScreenW,  s_state.screen_w);
   dict_write_int16(out, MESSAGE_KEY_MapScreenH,  s_state.screen_h);
   dict_write_int16(out, MESSAGE_KEY_MapSelected, s_state.selected_index);
+  /* Header height — JS sizes the tile bitmap from this */
+  dict_write_int16(out, MESSAGE_KEY_MapPadTop,  MAP_PAD_TOP);
 #ifdef PBL_COLOR
   dict_write_int16(out, MESSAGE_KEY_MapBW, 0);
 #else

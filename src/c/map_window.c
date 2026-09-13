@@ -1,11 +1,19 @@
 /* =============================================================
-   map_window.c – FuelWatch map view
-   OSM tile backdrop (dithered, chunked from phone) +
-   station dots + ActionBar with navigate action.
+   map_window.c – FuelWatch map / detail view
+
+   Buttons:
+     UP / DOWN  – previous / next station (re-fetches the tile)
+     SELECT     – toggle map view <-> detail view
+     BACK       – return to the list
+
+   MAP_PAD_TOP / BOT / SIDE live in station.h: the JS side sizes
+   the tile bitmap from the same values, so they have exactly one
+   definition and travel to the phone with the map request.
    ============================================================= */
 
 #include <pebble.h>
 #include "station.h"
+#include "list_window.h"
 #include "map_window.h"
 
 /* Declared in main.c */
@@ -13,48 +21,106 @@ void send_map_request(void);
 void tile_buf_free(void);
 
 /* ----------------------------------------------------------
-   Layout constants
-   ActionBarLayer is 30px wide on regular, 40px on Emery.
-   Map area is inset by action bar width on the right.
-   Title bar height increased to compensate for smaller map.
+   Per-platform detail metrics
 ---------------------------------------------------------- */
 #ifdef PBL_PLATFORM_EMERY
-  #define ACTION_BAR_W   40
-  #define MAP_PAD_TOP    24
+  #define HDR_TEXT_Y     4    /* centres the label in the 32px bar */
+  #define ROW_H         36
+  #define VALUE_DROP     5    /* 24px value vs 20px label baseline */
+  #define SIDE_PAD       8
 #else
-  #define ACTION_BAR_W   30
-  #define MAP_PAD_TOP    20
+  #define HDR_TEXT_Y     1    /* centres the label in the 19px bar */
+  #define ROW_H         30
+  #define VALUE_DROP     4    /* 24px value vs 18px label baseline */
+  #define SIDE_PAD       6
 #endif
 
-#define MAP_PAD_BOT    2
-#define MAP_PAD_SIDE   6
-#define BBOX_PAD       0.15f
-
-#define DOT_SELECTED   6
-#define DOT_OWN        3
-#define CROSSHAIR_ARM  6
-#define LABEL_W        64
-#define LABEL_H        14
-#define LABEL_OFFSET_Y 3
+#define BBOX_PAD        0.15f
+#define DOT_SELECTED     6
+#define DOT_OWN          3
+#define CROSSHAIR_ARM    6
+#define LABEL_W         64
+#define LABEL_H         14
+#define LABEL_OFFSET_Y   3
 
 /* ----------------------------------------------------------
    Module state
 ---------------------------------------------------------- */
-static Window          *s_window        = NULL;
-static Layer           *s_canvas        = NULL;
-static TextLayer       *s_loading_layer = NULL;
-static ActionBarLayer  *s_action_bar    = NULL;
-static GBitmap         *s_nav_icon      = NULL;
-static GBitmap         *s_tile_bitmap   = NULL;
-static bool             s_tile_ready    = false;
-static bool             s_tile_failed   = false;
+static Window    *s_window        = NULL;
+static Layer     *s_canvas        = NULL;
+static TextLayer *s_loading_layer = NULL;
+static GBitmap   *s_tile_bitmap   = NULL;
+static bool       s_tile_ready    = false;
+static bool       s_show_detail   = false;
 
-/* Tile lat/lon bounds */
-static float  s_tile_min_lat    = 0.f;
-static float  s_tile_max_lat    = 0.f;
-static float  s_tile_min_lon    = 0.f;
-static float  s_tile_max_lon    = 0.f;
-static bool   s_tile_has_bounds = false;
+/* Tile lat/lon bounds, read from the tile header */
+static float s_tile_min_lat    = 0.f;
+static float s_tile_max_lat    = 0.f;
+static float s_tile_min_lon    = 0.f;
+static float s_tile_max_lon    = 0.f;
+static bool  s_tile_has_bounds = false;
+
+/* Custom fonts */
+static GFont s_font_header = NULL;
+static GFont s_font_addr   = NULL;
+static GFont s_font_label  = NULL;
+static GFont s_font_value  = NULL;
+static GFont s_font_small  = NULL;
+
+/* A failed font load returns NULL; fall back rather than crash */
+static GFont fnt(GFont f, const char *fallback_key) {
+  return f ? f : fonts_get_system_font(fallback_key);
+}
+
+static void fonts_load_all(void) {
+#ifdef PBL_PLATFORM_EMERY
+  s_font_header = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
+  s_font_addr   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_20));
+  s_font_label  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_20));
+  s_font_small  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_18));
+  s_font_value  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_24));
+#else
+  s_font_header = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_14));
+  s_font_addr   = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
+  s_font_label  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_18));
+  s_font_small  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUI_14));
+  s_font_value  = fonts_load_custom_font(resource_get_handle(RESOURCE_ID_FONT_SEGOEUIB_18));
+#endif
+  /* Price and distance values keep the same size on every platform */
+  
+
+  APP_LOG(APP_LOG_LEVEL_INFO, "Map fonts loaded, heap=%d", (int)heap_bytes_free());
+}
+
+static void fonts_unload_all(void) {
+  if (s_font_header) { fonts_unload_custom_font(s_font_header); s_font_header = NULL; }
+  if (s_font_addr)   { fonts_unload_custom_font(s_font_addr);   s_font_addr   = NULL; }
+  if (s_font_label)  { fonts_unload_custom_font(s_font_label);  s_font_label  = NULL; }
+  if (s_font_value)  { fonts_unload_custom_font(s_font_value);  s_font_value  = NULL; }
+  if (s_font_small)  { fonts_unload_custom_font(s_font_small);  s_font_small  = NULL; }
+}
+
+/* ----------------------------------------------------------
+   Formatting helpers
+---------------------------------------------------------- */
+static void format_price(char *buf, size_t len, uint16_t mills) {
+  if (mills == 0) {
+    snprintf(buf, len, "---");
+  } else {
+    /* \xe2\x82\xac is the UTF-8 euro sign */
+    snprintf(buf, len, "\xe2\x82\xac%u.%03u", mills / 1000, mills % 1000);
+  }
+}
+
+static void format_dist(char *buf, size_t len, uint32_t dist_m) {
+  if (dist_m < 1000) {
+    snprintf(buf, len, "%um", (unsigned)dist_m);
+  } else {
+    snprintf(buf, len, "%u.%ukm",
+             (unsigned)(dist_m / 1000),
+             (unsigned)((dist_m % 1000) / 100));
+  }
+}
 
 /* ----------------------------------------------------------
    Projection
@@ -66,10 +132,9 @@ typedef struct {
 
 static Proj build_proj(GRect bounds) {
   Proj p;
-  /* Map area excludes action bar on right */
   p.map_x0 = bounds.origin.x + MAP_PAD_SIDE;
   p.map_y0 = bounds.origin.y + MAP_PAD_TOP;
-  p.map_w  = bounds.size.w - MAP_PAD_SIDE * 2 - ACTION_BAR_W;
+  p.map_w  = bounds.size.w - MAP_PAD_SIDE * 2;
   p.map_h  = bounds.size.h - MAP_PAD_TOP - MAP_PAD_BOT;
 
   if (s_tile_has_bounds) {
@@ -82,6 +147,7 @@ static Proj build_proj(GRect bounds) {
     p.min_lon = s_tile_min_lon - lon_pad;
     p.max_lon = s_tile_max_lon + lon_pad;
   } else {
+    /* Before the tile lands: bbox of own position + selected station */
     AppState *state = app_state_get();
     uint8_t   sel   = state->selected_index;
     float ownLat = state->own_lat_e6 / 1000000.f;
@@ -110,29 +176,38 @@ static GPoint proj_point(Proj *p, int32_t lat_e6, int32_t lon_e6) {
 }
 
 /* ----------------------------------------------------------
-   Draw helpers
+   Shared chrome
 ---------------------------------------------------------- */
+static void draw_title_bar(GContext *ctx, GRect bounds, const char *title) {
+#ifdef PBL_COLOR
+  graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+#else
+  graphics_context_set_fill_color(ctx, GColorBlack);
+#endif
+  graphics_fill_rect(ctx, GRect(0, 0, bounds.size.w, MAP_PAD_TOP),
+                     0, GCornerNone);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, title,
+    fnt(s_font_header, FONT_KEY_GOTHIC_14_BOLD),
+    GRect(SIDE_PAD, HDR_TEXT_Y, bounds.size.w - SIDE_PAD * 2, MAP_PAD_TOP),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+}
+
 static void draw_station_dot(GContext *ctx, GPoint pt,
-                              const char *label, uint8_t r, bool selected) {
-  /* White halo */
+                             const char *label, uint8_t r) {
+  /* White halo keeps the dot readable over any tile content */
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_circle(ctx, pt, r + 2);
 
 #ifdef PBL_COLOR
-  graphics_context_set_fill_color(ctx, selected ? GColorCobaltBlue : GColorDarkGray);
+  graphics_context_set_fill_color(ctx,   GColorCobaltBlue);
+  graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
 #else
-  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_context_set_fill_color(ctx,   GColorBlack);
+  graphics_context_set_stroke_color(ctx, GColorBlack);
 #endif
   graphics_fill_circle(ctx, pt, r);
-
-  if (selected) {
-#ifdef PBL_COLOR
-    graphics_context_set_stroke_color(ctx, GColorCobaltBlue);
-#else
-    graphics_context_set_stroke_color(ctx, GColorBlack);
-#endif
-    graphics_draw_circle(ctx, pt, r + 3);
-  }
+  graphics_draw_circle(ctx, pt, r + 3);
 
   GRect label_rect = GRect(pt.x - LABEL_W/2,
                            pt.y - r - LABEL_OFFSET_Y - LABEL_H,
@@ -147,132 +222,231 @@ static void draw_station_dot(GContext *ctx, GPoint pt,
 }
 
 /* ----------------------------------------------------------
+   Detail view
+   The address box is measured rather than fixed, so it grows to
+   however many lines the text needs.
+---------------------------------------------------------- */
+static void draw_detail(GContext *ctx, GRect bounds, Station *stn) {
+  AppState *state = app_state_get();
+  int16_t   w     = bounds.size.w;
+  int16_t   avail = w - SIDE_PAD * 2;
+  int16_t   y     = MAP_PAD_TOP + 4;
+
+  graphics_context_set_fill_color(ctx, GColorWhite);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  draw_title_bar(ctx, bounds, stn->name);
+
+  graphics_context_set_text_color(ctx, GColorBlack);
+
+  /* --- Address: bold, measured so it wraps to as many lines as fit ---
+     The cap is derived from what is left once the two value rows and
+     the counter have their space, so it stays right if the metrics
+     change. TrailingEllipsis wraps and marks any genuine overflow. */
+  GFont addr_font  = fnt(s_font_addr, FONT_KEY_GOTHIC_18_BOLD);
+  int16_t max_addr_h = bounds.size.h
+                     - 24            /* position counter strip */
+                     - (MAP_PAD_TOP + 4)
+                     - 5             /* separator */
+                     - ROW_H * 2     /* price + distance rows */
+                     - 6;            /* gap below address */
+  if (max_addr_h < 20) max_addr_h = 20;
+
+  GSize addr_size = graphics_text_layout_get_content_size(
+                      stn->address, addr_font,
+                      GRect(0, 0, avail, max_addr_h),
+                      GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+  if (addr_size.h > max_addr_h) addr_size.h = max_addr_h;
+
+  graphics_draw_text(ctx, stn->address, addr_font,
+    GRect(SIDE_PAD, y, avail, addr_size.h + 4),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  y += addr_size.h + 6;
+
+  /* --- Separator --- */
+#ifdef PBL_COLOR
+  graphics_context_set_stroke_color(ctx, GColorLightGray);
+#else
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+#endif
+  graphics_draw_line(ctx, GPoint(SIDE_PAD, y), GPoint(w - SIDE_PAD, y));
+  y += 5;
+
+  GFont label_font = fnt(s_font_label, FONT_KEY_GOTHIC_18);
+  GFont value_font = fnt(s_font_value, FONT_KEY_GOTHIC_24_BOLD);
+  int16_t label_w  = avail / 2;
+  int16_t value_w  = avail - label_w;
+
+  /* --- Fuel type / price --- */
+  char price_buf[12];
+  format_price(price_buf, sizeof(price_buf), stn->fuel_mills);
+
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, fuel_type_label(state->fuel_type), label_font,
+    GRect(SIDE_PAD, y, label_w, ROW_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, price_buf, value_font,
+    GRect(SIDE_PAD + label_w, y - VALUE_DROP, value_w, ROW_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+  y += ROW_H;
+
+  /* --- Distance --- */
+  char dist_buf[16];
+  format_dist(dist_buf, sizeof(dist_buf), stn->dist_m);
+
+  graphics_draw_text(ctx, "Distance", label_font,
+    GRect(SIDE_PAD, y, label_w, ROW_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, dist_buf, value_font,
+    GRect(SIDE_PAD + label_w, y - VALUE_DROP, value_w, ROW_H),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+
+  /* --- Position counter, bottom right --- */
+  char pos_buf[12];
+  snprintf(pos_buf, sizeof(pos_buf), "%d/%d",
+           state->selected_index + 1, state->count);
+#ifdef PBL_COLOR
+  graphics_context_set_text_color(ctx, GColorDarkGray);
+#else
+  graphics_context_set_text_color(ctx, GColorBlack);
+#endif
+  graphics_draw_text(ctx, pos_buf,
+    fnt(s_font_small, FONT_KEY_GOTHIC_14),
+    GRect(SIDE_PAD, bounds.size.h - 24, avail, 22),
+    GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+}
+
+/* ----------------------------------------------------------
    Canvas draw callback
 ---------------------------------------------------------- */
 static void canvas_update_proc(Layer *layer, GContext *ctx) {
   AppState *state  = app_state_get();
   GRect     bounds = layer_get_bounds(layer);
+  uint8_t   sel    = state->selected_index;
+  Station  *stn    = &state->stations[sel];
 
-  /* White background */
+  if (s_show_detail) {
+    draw_detail(ctx, bounds, stn);
+    return;
+  }
+
   graphics_context_set_fill_color(ctx, GColorWhite);
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
 
   /* --- Tile backdrop ------------------------------------ */
   if (s_tile_ready && s_tile_bitmap) {
     GRect tile_rect = GRect(MAP_PAD_SIDE, MAP_PAD_TOP,
-                            bounds.size.w - MAP_PAD_SIDE * 2 - ACTION_BAR_W,
+                            bounds.size.w - MAP_PAD_SIDE * 2,
                             bounds.size.h - MAP_PAD_TOP - MAP_PAD_BOT);
+    /* 1-bit bitmaps take stroke_color for 1-bits, fill_color for 0-bits */
     graphics_context_set_stroke_color(ctx, GColorBlack);
-    graphics_context_set_fill_color(ctx,  GColorWhite);
+    graphics_context_set_fill_color(ctx,   GColorWhite);
 #ifdef PBL_COLOR
     graphics_context_set_compositing_mode(ctx, GCompOpAssign);
 #endif
     graphics_draw_bitmap_in_rect(ctx, s_tile_bitmap, tile_rect);
-#ifdef PBL_COLOR
-    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
-#endif
   }
 
-  /* --- Title bar --------------------------------------- */
-  uint8_t  sel = state->selected_index;
-  Station *stn = &state->stations[sel];
-  char     title[32];
-  snprintf(title, sizeof(title), "%s", stn->name);
+  draw_title_bar(ctx, bounds, stn->name);
 
-#ifdef PBL_COLOR
-  graphics_context_set_fill_color(ctx, GColorCobaltBlue);
-#else
-  graphics_context_set_fill_color(ctx, GColorBlack);
-#endif
-  graphics_fill_rect(ctx,
-    GRect(0, 0, bounds.size.w - ACTION_BAR_W, MAP_PAD_TOP),
-    0, GCornerNone);
-  graphics_context_set_text_color(ctx, GColorWhite);
-  graphics_draw_text(ctx, title,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14_BOLD),
-    GRect(4, 1, bounds.size.w - ACTION_BAR_W - 8, MAP_PAD_TOP - 2),
-    GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
-
-  /* --- Dots -------------------------------------------- */
+  /* --- Markers ----------------------------------------- */
   Proj proj = build_proj(bounds);
 
-  /* Selected station */
   GPoint pb = proj_point(&proj, stn->lat_e6, stn->lon_e6);
-  draw_station_dot(ctx, pb, stn->name, DOT_SELECTED, true);
+  draw_station_dot(ctx, pb, stn->name, DOT_SELECTED);
 
-  /* Own position crosshair */
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Own pos e6: %ld,%ld",
-          (long)state->own_lat_e6, (long)state->own_lon_e6);
   GPoint own = proj_point(&proj, state->own_lat_e6, state->own_lon_e6);
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Own pixel: %d,%d screen: %dx%d",
-          (int)own.x, (int)own.y,
-          (int)(proj.map_x0 + proj.map_w),
-          (int)(proj.map_y0 + proj.map_h));
-
-  /* White halo then coloured dot */
   graphics_context_set_stroke_color(ctx, GColorWhite);
-  graphics_context_set_fill_color(ctx,  GColorWhite);
+  graphics_context_set_fill_color(ctx,   GColorWhite);
   graphics_fill_circle(ctx, own, DOT_OWN + 2);
-  graphics_draw_line(ctx,
-    GPoint(own.x - CROSSHAIR_ARM - 1, own.y),
-    GPoint(own.x + CROSSHAIR_ARM + 1, own.y));
-  graphics_draw_line(ctx,
-    GPoint(own.x, own.y - CROSSHAIR_ARM - 1),
-    GPoint(own.x, own.y + CROSSHAIR_ARM + 1));
+  graphics_draw_line(ctx, GPoint(own.x - CROSSHAIR_ARM - 1, own.y),
+                          GPoint(own.x + CROSSHAIR_ARM + 1, own.y));
+  graphics_draw_line(ctx, GPoint(own.x, own.y - CROSSHAIR_ARM - 1),
+                          GPoint(own.x, own.y + CROSSHAIR_ARM + 1));
 #ifdef PBL_COLOR
   graphics_context_set_stroke_color(ctx, GColorRed);
-  graphics_context_set_fill_color(ctx,  GColorRed);
+  graphics_context_set_fill_color(ctx,   GColorRed);
 #else
   graphics_context_set_stroke_color(ctx, GColorBlack);
-  graphics_context_set_fill_color(ctx,  GColorBlack);
+  graphics_context_set_fill_color(ctx,   GColorBlack);
 #endif
   graphics_fill_circle(ctx, own, DOT_OWN);
-  graphics_draw_line(ctx,
-    GPoint(own.x - CROSSHAIR_ARM, own.y),
-    GPoint(own.x + CROSSHAIR_ARM, own.y));
-  graphics_draw_line(ctx,
-    GPoint(own.x, own.y - CROSSHAIR_ARM),
-    GPoint(own.x, own.y + CROSSHAIR_ARM));
+  graphics_draw_line(ctx, GPoint(own.x - CROSSHAIR_ARM, own.y),
+                          GPoint(own.x + CROSSHAIR_ARM, own.y));
+  graphics_draw_line(ctx, GPoint(own.x, own.y - CROSSHAIR_ARM),
+                          GPoint(own.x, own.y + CROSSHAIR_ARM));
 }
 
 /* ----------------------------------------------------------
-   ActionBar click handler — navigate to selected station
+   Station switching
 ---------------------------------------------------------- */
-static void action_bar_select_click(ClickRecognizerRef recognizer, void *ctx) {
+static void select_station(uint8_t new_index) {
   AppState *state = app_state_get();
-  uint8_t   sel   = state->selected_index;
-  Station  *stn   = &state->stations[sel];
+  if (new_index >= state->count)          return;
+  if (new_index == state->selected_index) return;
 
-  /* Send navigate request to phone JS layer */
-  /* Pack lat,lon as "lat_e6,lon_e6" string on Navigate key */
-  char nav_str[32];
-  snprintf(nav_str, sizeof(nav_str), "%ld,%ld",
-           (long)stn->lat_e6, (long)stn->lon_e6);
-  APP_LOG(APP_LOG_LEVEL_INFO, "Navigate to: %s", nav_str);
+  state->selected_index = new_index;
 
-  DictionaryIterator *out;
-  if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-    dict_write_cstring(out, MESSAGE_KEY_Navigate, nav_str);
-    app_message_outbox_send();
+  /* Keep the list highlight in step for when the user goes back */
+  list_window_sync_selection();
+
+  /* A new station means a new tile — drop the old one and re-request */
+  s_tile_ready      = false;
+  s_tile_has_bounds = false;
+  if (s_tile_bitmap) {
+    gbitmap_destroy(s_tile_bitmap);
+    s_tile_bitmap = NULL;
+  }
+  if (!s_show_detail && s_loading_layer) {
+    layer_set_hidden(text_layer_get_layer(s_loading_layer), false);
+  }
+  layer_mark_dirty(s_canvas);
+  send_map_request();
+}
+
+/* ----------------------------------------------------------
+   Click handlers
+---------------------------------------------------------- */
+static void up_click(ClickRecognizerRef recognizer, void *ctx) {
+  AppState *state = app_state_get();
+  if (state->selected_index > 0) {
+    select_station(state->selected_index - 1);
   }
 }
 
-static void action_bar_click_config(void *ctx) {
-  window_single_click_subscribe(BUTTON_ID_SELECT, action_bar_select_click);
+static void down_click(ClickRecognizerRef recognizer, void *ctx) {
+  AppState *state = app_state_get();
+  if (state->count > 0 &&
+      state->selected_index < (uint8_t)(state->count - 1)) {
+    select_station(state->selected_index + 1);
+  }
+}
+
+static void select_click(ClickRecognizerRef recognizer, void *ctx) {
+  s_show_detail = !s_show_detail;
+  if (s_loading_layer) {
+    /* The detail view never shows the loading overlay */
+    layer_set_hidden(text_layer_get_layer(s_loading_layer),
+                     s_show_detail || s_tile_ready);
+  }
+  layer_mark_dirty(s_canvas);
+}
+
+static void click_config_provider(void *ctx) {
+  window_single_click_subscribe(BUTTON_ID_UP,     up_click);
+  window_single_click_subscribe(BUTTON_ID_DOWN,   down_click);
+  window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
 }
 
 /* ----------------------------------------------------------
-   Bitmap creation from tile buffer
+   Bitmap from the reassembled tile buffer
    Header (21 bytes): w(2) h(2) bw(1) minLat(4) maxLat(4) minLon(4) maxLon(4)
-   Pixels: 1-bit packed, ceil(w/8) bytes per row
+   Pixels: 1-bit packed, ceil(w/8) bytes per row, LSB = leftmost pixel
 ---------------------------------------------------------- */
 static void create_bitmap_from_tile(const uint8_t *buf, size_t len) {
-  if (len < 19) return;
+  if (len < 21) return;
 
-  int w    = (buf[0] << 8) | buf[1];
-  int h    = (buf[2] << 8) | buf[3];
-  int isBW = buf[4];
-  (void)isBW;
+  int w = (buf[0] << 8) | buf[1];
+  int h = (buf[2] << 8) | buf[3];
 
   int32_t minLatE6 = (int32_t)((buf[5]<<24)|(buf[6]<<16)|(buf[7]<<8)|buf[8]);
   int32_t maxLatE6 = (int32_t)((buf[9]<<24)|(buf[10]<<16)|(buf[11]<<8)|buf[12]);
@@ -297,25 +471,19 @@ static void create_bitmap_from_tile(const uint8_t *buf, size_t len) {
     s_tile_bitmap = NULL;
   }
 
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Tile header: %dx%d bw=%d len=%d", w, h, isBW, (int)len);
-  APP_LOG(APP_LOG_LEVEL_INFO, "Creating bitmap %dx%d bw=%d, heap=%d",
-          w, h, isBW, (int)heap_bytes_free());
-
   int    src_stride  = (w + 7) / 8;
   size_t bw_expected = (size_t)src_stride * h;
   if (len < 21 + bw_expected) {
-    APP_LOG(APP_LOG_LEVEL_ERROR, "1-bit tile short: %d need %d",
-            (int)(len-21), (int)bw_expected);
+    APP_LOG(APP_LOG_LEVEL_ERROR, "Tile short: %d need %d",
+            (int)(len - 21), (int)bw_expected);
     return;
   }
 
   GBitmap *bmp = gbitmap_create_blank(GSize(w, h), GBitmapFormat1Bit);
-  if (!bmp) { APP_LOG(APP_LOG_LEVEL_ERROR, "1-bit bitmap alloc failed"); return; }
+  if (!bmp) { APP_LOG(APP_LOG_LEVEL_ERROR, "Bitmap alloc failed"); return; }
 
-  uint8_t  *dst       = gbitmap_get_data(bmp);
+  uint8_t  *dst        = gbitmap_get_data(bmp);
   uint16_t  dst_stride = gbitmap_get_bytes_per_row(bmp);
-  APP_LOG(APP_LOG_LEVEL_DEBUG, "Strides: src=%d dst=%d", src_stride, (int)dst_stride);
-
   for (int y = 0; y < h; y++) {
     memset(dst + (size_t)y * dst_stride, 0, dst_stride);
     memcpy(dst + (size_t)y * dst_stride,
@@ -323,7 +491,8 @@ static void create_bitmap_from_tile(const uint8_t *buf, size_t len) {
            src_stride);
   }
   s_tile_bitmap = bmp;
-  APP_LOG(APP_LOG_LEVEL_INFO, "Bitmap created, heap=%d", (int)heap_bytes_free());
+  APP_LOG(APP_LOG_LEVEL_INFO, "Tile bitmap %dx%d, heap=%d",
+          w, h, (int)heap_bytes_free());
 }
 
 /* ----------------------------------------------------------
@@ -333,48 +502,27 @@ static void window_load(Window *window) {
   Layer *root   = window_get_root_layer(window);
   GRect  bounds = layer_get_bounds(root);
 
-  /* Canvas fills full window — action bar overlays right side */
+  fonts_load_all();
+
   s_canvas = layer_create(bounds);
   layer_set_update_proc(s_canvas, canvas_update_proc);
   layer_add_child(root, s_canvas);
 
-  /* Loading overlay */
   s_loading_layer = text_layer_create(
-    GRect(0, bounds.size.h / 2 - 10,
-          bounds.size.w - ACTION_BAR_W, 20));
+    GRect(0, bounds.size.h / 2 - 10, bounds.size.w, 20));
   text_layer_set_text(s_loading_layer, "Loading map...");
   text_layer_set_text_alignment(s_loading_layer, GTextAlignmentCenter);
-  text_layer_set_font(s_loading_layer,
-    fonts_get_system_font(FONT_KEY_GOTHIC_14));
+  text_layer_set_font(s_loading_layer, fnt(s_font_small, FONT_KEY_GOTHIC_14));
   text_layer_set_background_color(s_loading_layer, GColorClear);
   layer_add_child(root, text_layer_get_layer(s_loading_layer));
 
-  /* Navigation icon — platform sized */
-#ifdef PBL_PLATFORM_EMERY
-  s_nav_icon = gbitmap_create_with_resource(RESOURCE_ID_NAVIGATE_ICON25);
-#else
-  s_nav_icon = gbitmap_create_with_resource(RESOURCE_ID_NAVIGATE_ICON18);
-#endif
-
-  /* ActionBarLayer on the right */
-  s_action_bar = action_bar_layer_create();
-  if (s_nav_icon) {
-    action_bar_layer_set_icon(s_action_bar, BUTTON_ID_SELECT, s_nav_icon);
-  }
-#ifdef PBL_COLOR
-  action_bar_layer_set_background_color(s_action_bar, GColorCobaltBlue);
-#endif
-  /* add_to_window must come BEFORE set_click_config_provider
-     so the action bar owns the window click config first */
-  action_bar_layer_add_to_window(s_action_bar, window);
-  action_bar_layer_set_click_config_provider(s_action_bar,
-                                             action_bar_click_config);
+  window_set_click_config_provider(window, click_config_provider);
 }
 
 static void window_appear(Window *window) {
   s_tile_ready      = false;
-  s_tile_failed     = false;
   s_tile_has_bounds = false;
+  s_show_detail     = false;
   if (s_tile_bitmap) {
     gbitmap_destroy(s_tile_bitmap);
     s_tile_bitmap = NULL;
@@ -384,19 +532,9 @@ static void window_appear(Window *window) {
 }
 
 static void window_unload(Window *window) {
-  /* Destroy in order: bitmap, action bar icon, action bar, layers */
   if (s_tile_bitmap) {
     gbitmap_destroy(s_tile_bitmap);
     s_tile_bitmap = NULL;
-  }
-  if (s_action_bar) {
-    action_bar_layer_remove_from_window(s_action_bar);
-    action_bar_layer_destroy(s_action_bar);
-    s_action_bar = NULL;
-  }
-  if (s_nav_icon) {
-    gbitmap_destroy(s_nav_icon);
-    s_nav_icon = NULL;
   }
   if (s_canvas) {
     layer_destroy(s_canvas);
@@ -406,9 +544,10 @@ static void window_unload(Window *window) {
     text_layer_destroy(s_loading_layer);
     s_loading_layer = NULL;
   }
+  fonts_unload_all();
   s_tile_ready      = false;
-  s_tile_failed     = false;
   s_tile_has_bounds = false;
+  s_show_detail     = false;
   window_destroy(s_window);
   s_window = NULL;
 }
@@ -434,13 +573,16 @@ void map_window_tile_arrived(uint8_t *buf, size_t len) {
   create_bitmap_from_tile(buf, len);
   free(buf);
   s_tile_ready = (s_tile_bitmap != NULL);
-  layer_set_hidden(text_layer_get_layer(s_loading_layer), true);
+  if (s_loading_layer) {
+    layer_set_hidden(text_layer_get_layer(s_loading_layer), true);
+  }
   layer_mark_dirty(s_canvas);
 }
 
 void map_window_tile_failed(void) {
   if (!s_window || !window_stack_contains_window(s_window)) return;
-  s_tile_failed = true;
-  layer_set_hidden(text_layer_get_layer(s_loading_layer), true);
+  if (s_loading_layer) {
+    layer_set_hidden(text_layer_get_layer(s_loading_layer), true);
+  }
   layer_mark_dirty(s_canvas);
 }

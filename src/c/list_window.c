@@ -345,6 +345,14 @@ void list_window_data_arrived(void) {
   }
 }
 
+void list_window_sync_selection(void) {
+  if (!s_menu_layer) return;
+  AppState *state = app_state_get();
+  if (state->selected_index >= state->count) return;
+  MenuIndex idx = MenuIndex(0, state->selected_index);
+  menu_layer_set_selected_index(s_menu_layer, idx, MenuRowAlignCenter, false);
+}
+
 void list_window_destroy(void) {
   if (s_window) {
     window_destroy(s_window);

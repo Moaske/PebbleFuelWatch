@@ -386,13 +386,14 @@ function sendTileChunk(tileBytes, chunkIdx, totalChunks) {
 /* ----------------------------------------------------------
    Map tile fetch + process pipeline
 ---------------------------------------------------------- */
-function fetchAndSendTile(lat, lon, screenW, screenH, isBW, zoom, sel) {
+function fetchAndSendTile(lat, lon, screenW, screenH, isBW, zoom, sel, padTopIn) {
   zoom = zoom || TILE_ZOOM_MAX;
   var tile   = latLonToTile(lat, lon, zoom);
   var url    = tileUrl(zoom, tile.x, tile.y);
 
-  /* Map area dimensions (mirrors C-side MAP_PAD_* constants) */
-  var padTop  = 16;
+  /* Map area dimensions. padTop comes from the watch (MAP_PAD_TOP in
+     station.h) so the header height has exactly one definition. */
+  var padTop  = padTopIn || 16;
   var padBot  = 2;
   var padSide = 6;
   var mapW    = screenW - padSide * 2;
@@ -401,7 +402,7 @@ function fetchAndSendTile(lat, lon, screenW, screenH, isBW, zoom, sel) {
   /* Cache key includes selected station so different stations
      always get their own tile even if they share the same tile coords */
   var cacheKey = 'fw_tile_' + zoom + '_' + tile.x + '_' + tile.y +
-                 '_s' + (sel || 0) + '_' + (isBW ? '1' : '0');
+                 '_s' + (sel || 0) + '_p' + padTop + '_' + (isBW ? '1' : '0');
   var cached   = cacheGet(cacheKey);
   var now      = Date.now();
 
@@ -452,7 +453,7 @@ function packStation(s) {
   var latE6     = Math.round(s.lat  * 1e6);
   var lonE6     = Math.round(s.lon  * 1e6);
   var name      = (s.name    || '').substring(0, 20).replace(/[|\n]/g, ' ');
-  var address   = (s.address || '').substring(0, 24).replace(/[|\n]/g, ' ');
+  var address   = (s.address || '').substring(0, 48).replace(/[|\n]/g, ' ');
   return [s.id, name, address, distM, fuelMills, latE6, lonE6].join('|');
 }
 
@@ -537,7 +538,7 @@ function pickZoom(lat1, lon1, lat2, lon2) {
   return 13;
 }
 
-function handleMapRequest(selectedIndex, screenW, screenH, isBW) {
+function handleMapRequest(selectedIndex, screenW, screenH, isBW, padTop) {
   if (!s_lastStations || s_lastStations.length === 0) {
     console.warn('[FuelWatch] Map request but no station data');
     return;
@@ -552,7 +553,7 @@ function handleMapRequest(selectedIndex, screenW, screenH, isBW) {
   var dist = haversine(s_lastLat, s_lastLon, stn.lat, stn.lon);
   console.log('[FuelWatch] Map: dist=' + dist.toFixed(2) + 'km zoom=' + zoom);
   /* Always use 1-bit B&W, tile centred on midpoint */
-  fetchAndSendTile(midLat, midLon, screenW, screenH, true, zoom, sel);
+  fetchAndSendTile(midLat, midLon, screenW, screenH, true, zoom, sel, padTop);
 }
 
 /* ----------------------------------------------------------
@@ -622,23 +623,13 @@ Pebble.addEventListener('appmessage', function(e) {
     var screenW = parseInt(payload.MapScreenW,  10) || 144;
     var screenH = parseInt(payload.MapScreenH,  10) || 168;
     var isBW    = payload.MapBW === 1 || payload.MapBW === '1';
+    var padTop  = parseInt(payload.MapPadTop, 10) || 16;
     console.log('[FuelWatch] Map request: sel=' + sel +
                 ' ' + screenW + 'x' + screenH + ' bw=' + isBW);
-    handleMapRequest(sel, screenW, screenH, isBW);
+    handleMapRequest(sel, screenW, screenH, isBW, padTop);
     return;
   }
 
-  // Navigate request — open geo: URI on phone
-  if (typeof payload.Navigate !== 'undefined') {
-    var parts = String(payload.Navigate).split(',');
-    var lat = parseInt(parts[0], 10) / 1e6;
-    var lon = parseInt(parts[1], 10) / 1e6;
-    var uri = 'https://www.google.com/maps/search/?api=1&query=' +
-              lat.toFixed(6) + ',' + lon.toFixed(6);
-    console.log('[FuelWatch] Navigate: ' + uri);
-    Pebble.openURL(uri);
-    return;
-  }
 
   console.log('[FuelWatch] Refresh requested');
   getLocation();

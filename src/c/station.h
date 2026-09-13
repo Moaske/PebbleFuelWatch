@@ -7,7 +7,21 @@
 
 #define MAX_STATIONS      10
 #define STATION_NAME_LEN  21   // 20 chars + null
-#define STATION_ADDR_LEN  25   // 24 chars + null
+#define STATION_ADDR_LEN  49   // 48 chars + null
+
+/* ----------------------------------------------------------
+   Map layout contract.
+   The JS side sizes the tile bitmap from these exact values
+   (sent with the map request), so they must not be duplicated
+   as literals anywhere else.
+---------------------------------------------------------- */
+#ifdef PBL_PLATFORM_EMERY
+  #define MAP_PAD_TOP  32   /* 200% of the original 16px header */
+#else
+  #define MAP_PAD_TOP  19   /* 120% of the original 16px header */
+#endif
+#define MAP_PAD_BOT     2
+#define MAP_PAD_SIDE    6
 
 /* Tile receive buffer — max size:
    Colour: mapW * mapH bytes (GColor8)  e.g. 188*210 = 39480

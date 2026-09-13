@@ -26,35 +26,20 @@
             "TileChunkN",
             "TileData",
             "MapBW",
-            "Navigate"
+            "Navigate",
+            "MapPadTop"
         ],
         "projectType": "native",
         "resources": {
             "media": [
                 {
-                    "file": "images/navigate_icon25.png",
-                    "name": "NAVIGATE_ICON25",
-                    "targetPlatforms": [
-                        "emery"
-                    ],
-                    "type": "bitmap"
-                },
-                {
-                    "file": "images/navigate_icon18.png",
-                    "name": "NAVIGATE_ICON18",
-                    "targetPlatforms": [
-                        "aplite",
-                        "basalt",
-                        "diorite",
-                        "flint"
-                    ],
-                    "type": "bitmap"
-                },
-                {
                     "file": "fonts/segoeui.ttf",
                     "name": "FONT_SEGOEUI_18",
                     "targetPlatforms": [
-                        "emery"
+                        "basalt",
+                        "diorite",
+                        "emery",
+                        "flint"
                     ],
                     "type": "font"
                 },
@@ -65,6 +50,14 @@
                         "basalt",
                         "diorite",
                         "flint"
+                    ],
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeui.ttf",
+                    "name": "FONT_SEGOEUI_20",
+                    "targetPlatforms": [
+                        "emery"
                     ],
                     "type": "font"
                 },
@@ -101,7 +94,21 @@
                     "file": "fonts/segoeuib.ttf",
                     "name": "FONT_SEGOEUIB_18",
                     "targetPlatforms": [
-                        "emery"
+                        "basalt",
+                        "diorite",
+                        "emery",
+                        "flint"
+                    ],
+                    "type": "font"
+                },
+                {
+                    "file": "fonts/segoeuib.ttf",
+                    "name": "FONT_SEGOEUIB_24",
+                    "targetPlatforms": [
+                        "basalt",
+                        "diorite",
+                        "emery",
+                        "flint"
                     ],
                     "type": "font"
                 },
@@ -126,5 +133,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.10"
+    "version": "1.0.12"
 }
