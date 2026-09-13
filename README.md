@@ -6,6 +6,7 @@ A Pebble nearby fuel station finder for Europe with price check, which kindly an
 - Fuel type can be set in phone setting (E10, Super, Diesel and LPG)
 - On select a simple map view to give a general sense of direction (use address for navigation) top is always north
 - Select again and get the Details screen with full Address, chosen fuel type Price and Distance
+- Map / Detail screen support advancing to next/previous stations with buttons (or touch on Emery)
 - Fully touch compatibel on Emery
 
 I have a Time 2, but none of the others. So Basalt, Diorite and Flint were built on the emulator which doesn't support my map (works fine on my Time 2 hardware but also not on Emery emulator). I'd be delighted if someone would provide screenshot of an actual map view on actual Basalt/Diorite/Flint hardware.
