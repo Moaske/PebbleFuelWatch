@@ -27,11 +27,19 @@
             "TileData",
             "MapBW",
             "Navigate",
-            "MapPadTop"
+            "MapPadTop",
+            "StationCount"
         ],
         "projectType": "native",
         "resources": {
             "media": [
+                {
+                    "file": "images/fuelwatch_app_icon.png",
+                    "menuIcon": true,
+                    "name": "FUELWATCH_APP_ICON",
+                    "targetPlatforms": null,
+                    "type": "bitmap"
+                },
                 {
                     "file": "fonts/segoeui.ttf",
                     "name": "FONT_SEGOEUI_18",
@@ -108,13 +116,6 @@
                         "emery"
                     ],
                     "type": "font"
-                },
-                {
-                    "file": "images/gasstation_app_icon.png",
-                    "menuIcon": true,
-                    "name": "APP_ICON",
-                    "targetPlatforms": null,
-                    "type": "bitmap"
                 }
             ]
         },
@@ -130,5 +131,5 @@
             "watchface": false
         }
     },
-    "version": "1.0.13"
+    "version": "1.2.0"
 }

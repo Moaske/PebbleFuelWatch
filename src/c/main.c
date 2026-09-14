@@ -34,37 +34,40 @@ void tile_buf_free(void) {
   }
 }
 
-#define INBOX_SIZE  2560
+/* 30 stations worst case is 2939 B; 4096 leaves margin and the
+   watch reports a maximum of 8200 B, so the request is granted. */
+#define INBOX_SIZE  4096
 #define OUTBOX_SIZE  256
 
 /* ----------------------------------------------------------
    Parse station line
-   Format: id|name|address|dist_m|fuel_mills|lat_e6|lon_e6
+   Format: name|address|dist_m|fuel_mills|lat_e6|lon_e6
+   The ANWB id is deliberately not sent: it is unused on the
+   watch and Belgian ids contain the pipe delimiter.
 ---------------------------------------------------------- */
 static bool parse_station_line(char *line, Station *out) {
   char *p   = line;
   char *sep;
   int field = 0;
 
-  while (field < 7) {
+  while (field < 6) {
     sep = strchr(p, '|');
     if (sep) *sep = '\0';
     switch (field) {
-      case 0: /* id — skip */ break;
-      case 1: strncpy(out->name,    p, STATION_NAME_LEN - 1);
+      case 0: strncpy(out->name,    p, STATION_NAME_LEN - 1);
               out->name[STATION_NAME_LEN - 1] = '\0';    break;
-      case 2: strncpy(out->address, p, STATION_ADDR_LEN - 1);
+      case 1: strncpy(out->address, p, STATION_ADDR_LEN - 1);
               out->address[STATION_ADDR_LEN - 1] = '\0';  break;
-      case 3: out->dist_m     = (uint32_t)atoi(p); break;
-      case 4: out->fuel_mills = (uint16_t)atoi(p); break;
-      case 5: out->lat_e6     = (int32_t) atoi(p); break;
-      case 6: out->lon_e6     = (int32_t) atoi(p); break;
+      case 2: out->dist_m     = (uint32_t)atoi(p); break;
+      case 3: out->fuel_mills = (uint16_t)atoi(p); break;
+      case 4: out->lat_e6     = (int32_t) atoi(p); break;
+      case 5: out->lon_e6     = (int32_t) atoi(p); break;
     }
     field++;
     if (!sep) break;
     p = sep + 1;
   }
-  return (field >= 6);
+  return (field == 6);
 }
 
 static void parse_stations_payload(const char *payload) {
@@ -198,17 +201,18 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
 
   /* --- Fuel type update (from Clay settings) --- */
   if (fuel_type_t && fuel_type_t->type == TUPLE_CSTRING) {
-    uint8_t new_fuel = parse_fuel_type(fuel_type_t->value->cstring);
-    bool changed = (new_fuel != s_state.fuel_type);
-    s_state.fuel_type = new_fuel;
-    APP_LOG(APP_LOG_LEVEL_INFO, "Fuel type: %d", s_state.fuel_type);
+    s_state.fuel_type = parse_fuel_type(fuel_type_t->value->cstring);
+    APP_LOG(APP_LOG_LEVEL_INFO, "Settings saved, fuel type: %d",
+            s_state.fuel_type);
     list_window_data_arrived();
-    if (changed) {
-      DictionaryIterator *out;
-      if (app_message_outbox_begin(&out) == APP_MSG_OK) {
-        dict_write_uint8(out, MESSAGE_KEY_STATUS, 0);
-        app_message_outbox_send();
-      }
+    /* Always re-request: this message only arrives when the user saves
+       settings, and the station count is applied phone-side, so we
+       cannot tell from here whether it changed. Station data no longer
+       carries FuelType, so this cannot loop. */
+    DictionaryIterator *out;
+    if (app_message_outbox_begin(&out) == APP_MSG_OK) {
+      dict_write_uint8(out, MESSAGE_KEY_STATUS, 0);
+      app_message_outbox_send();
     }
     return;
   }
@@ -253,7 +257,13 @@ static void init(void) {
   app_message_register_inbox_received(inbox_received);
   app_message_register_inbox_dropped(inbox_dropped);
   app_message_register_outbox_failed(outbox_failed);
-  app_message_open(INBOX_SIZE, OUTBOX_SIZE);
+  /* Ask for INBOX_SIZE but never more than the system will grant, so a
+     refused buffer shows up in the log instead of truncating silently */
+  uint32_t inbox_max = app_message_inbox_size_maximum();
+  uint32_t inbox     = INBOX_SIZE < inbox_max ? INBOX_SIZE : inbox_max;
+  AppMessageResult open_res = app_message_open(inbox, OUTBOX_SIZE);
+  APP_LOG(APP_LOG_LEVEL_INFO, "AppMessage inbox %d (max %d) result %d",
+          (int)inbox, (int)inbox_max, (int)open_res);
 
   list_window_push();
 }

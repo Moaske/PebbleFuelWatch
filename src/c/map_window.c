@@ -15,6 +15,7 @@
 #include "station.h"
 #include "list_window.h"
 #include "map_window.h"
+#include "gauge_window.h"
 
 /* Declared in main.c */
 void send_map_request(void);
@@ -424,8 +425,8 @@ static void select_station(uint8_t new_index) {
     gbitmap_destroy(s_tile_bitmap);
     s_tile_bitmap = NULL;
   }
-  if (!s_show_detail && s_loading_layer) {
-    layer_set_hidden(text_layer_get_layer(s_loading_layer), false);
+  if (s_loading_layer) {
+    layer_set_hidden(text_layer_get_layer(s_loading_layer), s_show_detail);
   }
   layer_mark_dirty(s_canvas);
   send_map_request();
@@ -459,10 +460,18 @@ static void select_click(ClickRecognizerRef recognizer, void *ctx) {
   layer_mark_dirty(s_canvas);
 }
 
+static void select_long_click(ClickRecognizerRef recognizer, void *ctx) {
+  gauge_window_push();
+}
+
 static void click_config_provider(void *ctx) {
   window_single_click_subscribe(BUTTON_ID_UP,     up_click);
   window_single_click_subscribe(BUTTON_ID_DOWN,   down_click);
   window_single_click_subscribe(BUTTON_ID_SELECT, select_click);
+  /* Short press toggles the view, long press opens the fuel gauge.
+     Both can coexist: the short handler fires on release only when
+     the long threshold was not reached. */
+  window_long_click_subscribe(BUTTON_ID_SELECT, 600, select_long_click, NULL);
 }
 
 /* ----------------------------------------------------------
@@ -550,12 +559,13 @@ static void window_load(Window *window) {
 static void window_appear(Window *window) {
   s_tile_ready      = false;
   s_tile_has_bounds = false;
-  s_show_detail     = false;
+  s_show_detail     = true;   /* detail first, map on SELECT */
   if (s_tile_bitmap) {
     gbitmap_destroy(s_tile_bitmap);
     s_tile_bitmap = NULL;
   }
-  layer_set_hidden(text_layer_get_layer(s_loading_layer), false);
+  /* Detail never shows the overlay, but the tile is already on its way */
+  layer_set_hidden(text_layer_get_layer(s_loading_layer), true);
   send_map_request();
 }
 

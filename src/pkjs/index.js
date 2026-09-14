@@ -22,7 +22,8 @@ var OSM_TILE = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 var BBOX_RADIUS    = 0.12;            // degrees for station list
 var CACHE_TTL_MS   = 15 * 60 * 1000; // 15 min station cache
 var TILE_CACHE_TTL = 60 * 60 * 1000; // 1 hour tile cache (increase after tuning)
-var MAX_STATIONS   = 10;
+var STATION_CAP    = 30;   /* must match MAX_STATIONS in station.h */
+var STATION_COUNTS = [10, 20, 30];
 var DRIFT_KM       = 2.0;
 var TILE_ZOOM_MAX  = 15;              // OSM zoom level (street detail)
 var TILE_ZOOM_MIN  = 13;              // OSM zoom level (wider area)
@@ -56,6 +57,20 @@ function cacheGet(key) {
 }
 function cacheSet(key, val) {
   try { localStorage.setItem(key, JSON.stringify(val)); } catch(e) {}
+}
+
+function getStationCountSetting() {
+  try {
+    var raw = localStorage.getItem('clay-settings');
+    if (raw) {
+      var s = JSON.parse(raw);
+      var n = parseInt(s && s.StationCount, 10);
+      if (STATION_COUNTS.indexOf(n) !== -1) return n;
+    }
+  } catch(e) {
+    console.log('[FuelWatch] Could not read station count: ' + e.message);
+  }
+  return STATION_COUNTS[0];
 }
 
 function getFuelTypeSetting() {
@@ -144,6 +159,17 @@ function fetchStations(lat, lon) {
     })
     .then(function(data) {
       if (!data || !Array.isArray(data.value)) throw new Error('Bad ANWB response');
+      /* totalResults is what ANWB says exists in the box. If it ever
+         exceeds what arrived, the API is capping us and the nearest
+         stations may not all be present. No sign of that so far. */
+      if (data.totalResults !== undefined &&
+          data.totalResults > data.value.length) {
+        console.warn('[FuelWatch] ANWB capped results: ' + data.value.length +
+                     ' of ' + data.totalResults);
+      } else {
+        console.log('[FuelWatch] ANWB returned ' + data.value.length +
+                    ' of ' + data.totalResults);
+      }
       return data.value;
     });
 }
@@ -454,7 +480,9 @@ function packStation(s) {
   var lonE6     = Math.round(s.lon  * 1e6);
   var name      = (s.name    || '').substring(0, 20).replace(/[|\n]/g, ' ');
   var address   = (s.address || '').substring(0, 48).replace(/[|\n]/g, ' ');
-  return [s.id, name, address, distM, fuelMills, latE6, lonE6].join('|');
+  /* The id is not sent: the watch never reads it, and ANWB Belgian
+     ids such as 'xavvy_M|BEL|1973' contain the pipe delimiter. */
+  return [name, address, distM, fuelMills, latE6, lonE6].join('|');
 }
 
 function sendToWatch(result) {
@@ -482,9 +510,12 @@ var s_lastLon      = null;
 function refresh(lat, lon) {
   var fuelType     = getFuelTypeSetting();
   var anwbFuelType = FUEL_TYPE_MAP[fuelType] || 'EURO95';
-  console.log('[FuelWatch] Refreshing for ' + lat + ',' + lon + ' fuel: ' + fuelType);
+  var wanted       = getStationCountSetting();
+  console.log('[FuelWatch] Refreshing for ' + lat + ',' + lon +
+              ' fuel: ' + fuelType + ' count: ' + wanted);
 
-  var cacheKey = 'fw_anwb_' + fuelType + '_' +
+  /* The cached list is already sliced, so the count belongs in the key */
+  var cacheKey = 'fw_anwb_' + fuelType + '_n' + wanted + '_' +
                  Math.round(lat * 100) + '_' + Math.round(lon * 100);
   var cached   = cacheGet(cacheKey);
   var now      = Date.now();
@@ -503,7 +534,7 @@ function refresh(lat, lon) {
       .map(function(raw) { return parseStation(raw, lat, lon, anwbFuelType); })
       .filter(function(s) { return s !== null && s.price !== null; })
       .sort(function(a, b) { return a.dist - b.dist; })
-      .slice(0, MAX_STATIONS);
+      .slice(0, wanted);
 
     console.log('[FuelWatch] Stations with ' + fuelType + ': ' + stations.length);
 

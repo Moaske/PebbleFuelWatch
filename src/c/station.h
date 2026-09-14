@@ -5,9 +5,18 @@
    station.h – shared data structures for FuelWatch
    ============================================================= */
 
-#define MAX_STATIONS      10
+/* Hard ceiling. The phone sends at most this many; the Clay
+   'Stations in list' setting chooses 10, 20 or 30 within it. */
+#define MAX_STATIONS      30
 #define STATION_NAME_LEN  21   // 20 chars + null
 #define STATION_ADDR_LEN  49   // 48 chars + null
+
+/* Persistent storage keys (watch-side, survives app exit) */
+#define PERSIST_KEY_FUEL_LEVEL  1
+
+/* Fuel gauge: 8 steps from Empty to Full, so 9 needle positions */
+#define FUEL_LEVEL_STEPS  8
+#define FUEL_LEVEL_MAX    FUEL_LEVEL_STEPS
 
 /* ----------------------------------------------------------
    Map layout contract.

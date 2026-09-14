@@ -102,7 +102,12 @@ static void draw_header(GContext *ctx, const Layer *cell_layer,
   GRect     bounds = layer_get_bounds(cell_layer);
   int16_t   w      = bounds.size.w;
 
+  /* Same header colour as map_window and gauge_window */
+#ifdef PBL_COLOR
+  graphics_context_set_fill_color(ctx, GColorCobaltBlue);
+#else
   graphics_context_set_fill_color(ctx, GColorBlack);
+#endif
   graphics_fill_rect(ctx, bounds, 0, GCornerNone);
   graphics_context_set_text_color(ctx, GColorWhite);
 
@@ -121,6 +126,15 @@ static void draw_header(GContext *ctx, const Layer *cell_layer,
     GTextOverflowModeTrailingEllipsis,
     GTextAlignmentRight,
     NULL);
+
+  /* 1px rule along the bottom edge. The selection highlight is the
+     same blue as this header, so without it a selected first row
+     merges into the header. */
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_draw_line(ctx,
+    GPoint(0, bounds.size.h - 1),
+    GPoint(w, bounds.size.h - 1));
 }
 
 static void draw_row(GContext *ctx, const Layer *cell_layer,
