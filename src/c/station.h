@@ -13,6 +13,7 @@
 
 /* Persistent storage keys (watch-side, survives app exit) */
 #define PERSIST_KEY_FUEL_LEVEL  1
+#define PERSIST_KEY_FUEL_TYPE   2
 
 /* Fuel gauge: 8 steps from Empty to Full, so 9 needle positions */
 #define FUEL_LEVEL_STEPS  8

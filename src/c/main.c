@@ -202,6 +202,10 @@ static void inbox_received(DictionaryIterator *iter, void *context) {
   /* --- Fuel type update (from Clay settings) --- */
   if (fuel_type_t && fuel_type_t->type == TUPLE_CSTRING) {
     s_state.fuel_type = parse_fuel_type(fuel_type_t->value->cstring);
+    /* Remember it on the watch: the phone only pushes FuelType when the
+       user saves settings, so without this the header label would fall
+       back to E10 on every relaunch while the prices stayed correct. */
+    persist_write_int(PERSIST_KEY_FUEL_TYPE, (int32_t)s_state.fuel_type);
     APP_LOG(APP_LOG_LEVEL_INFO, "Settings saved, fuel type: %d",
             s_state.fuel_type);
     list_window_data_arrived();
@@ -245,7 +249,12 @@ static void outbox_failed(DictionaryIterator *iter,
 static void init(void) {
   memset(&s_state, 0, sizeof(s_state));
   s_state.status    = STATUS_ERROR;
-  s_state.fuel_type = FUEL_E10;
+  /* Restore the fuel type chosen in settings. The phone keeps its own
+     copy in localStorage, but it only sends it to the watch on a save,
+     so the watch has to remember it across launches itself. */
+  s_state.fuel_type = persist_exists(PERSIST_KEY_FUEL_TYPE)
+                    ? (uint8_t)persist_read_int(PERSIST_KEY_FUEL_TYPE)
+                    : FUEL_E10;
 #ifdef PBL_PLATFORM_EMERY
   s_state.screen_w  = 200;
   s_state.screen_h  = 228;
