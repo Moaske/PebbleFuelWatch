@@ -1,5 +1,5 @@
 # Pebble FuelWatch
-A Pebble nearby fuel station finder for Europe with price check, which kindly and gratefully uses the ANWB fuel prices api.<br>Watch compatibilty: Basalt, Diorite, Emery and Flint.
+A Pebble nearby fuel station finder for Europe with price check, which kindly and gratefully uses the ANWB fuel prices api.<br>Watch compatibilty: Basalt, Diorite, Emery and Flint. Current version: 1.2.2
 
 ## Features
 - Main screen gets a list of fuel stations around you with their prices to up to 3 km
